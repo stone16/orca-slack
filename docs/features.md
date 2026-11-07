@@ -58,6 +58,8 @@
 | 11 | 运维 | 进程生命周期 | launchd plist；heartbeat 文件（给 `orca_automations` watchdog 看）；Socket Mode 自动重连；fatal → 发到运维频道 | — | #ops 频道 | 日志按大小滚动 |
 | 12 | 凭据 | 启动 | token 从 macOS keychain（现有 `slack-gateway` / `bot-token`）读，配置文件只放频道/用户 id；日志永不打 token | — | — | — |
 
+> impl note: P0 #8：当前 Orca 只释放已结算 worker，escalation 仍活跃时 release 可能返回 retained，桥不自动 stop，仍可显式 !stop/按钮停止；chat worker 无 terminal source 时显示“终端输出不可用”。
+
 **P0 验收（手动，一次跑通）**
 1. 在测试频道 @bot "给 repo X 的 README 加一行 hello" → 1 s 内 👀 → ≤2 min 回帖 dispatch id → 之后线程出现 PR 链接。
 2. 跑着的任务线程里 `!stop` → `worker-list` 显示该 dispatch 已停。

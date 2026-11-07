@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.stometa.orca-slack</string>
+  <key>ProgramArguments</key><array><string>__REPO_DIR__/bin/run.sh</string></array>
+  <key>WorkingDirectory</key><string>__REPO_DIR__</string>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__NODE_DIR__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>NODE_BIN</key><string>__NODE_BIN__</string>
+  </dict>
+  <key>StandardOutPath</key><string>__HOME__/Library/Logs/orca-slack/stdout.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/orca-slack/stderr.log</string>
+</dict>
+</plist>
