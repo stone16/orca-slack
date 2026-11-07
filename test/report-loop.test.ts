@@ -85,13 +85,20 @@ it('renders already answered questions inert when a delivery replays', async () 
   expect(slack.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ blocks: [], text: 'U1 answered this question.' }));
   expect(store.pendingQuestion('1.1')).toBeUndefined();
 });
-it('still reports and releases an escalation when terminal output is unavailable', async () => {
+it('reports an escalation without releasing the still-live worker', async () => {
   const { loop, orca, slack, store } = setup();
   orca.call.mockRejectedValueOnce(new Error('No terminal'));
   await loop.processDelivery({ messages: [{ ...done, type: 'escalation' }] });
   expect(slack.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('终端输出不可用') }));
-  expect(orca.call).toHaveBeenLastCalledWith('worker-release', ['--dispatch', 'd1']);
-  expect(store.byDispatch('d1')?.status).toBe('failed');
+  expect(slack.reactions.add).toHaveBeenCalledWith(expect.objectContaining({ name: 'x' }));
+  expect(orca.call.mock.calls.map(([verb]) => verb)).toEqual(['worker-read']);
+  expect(store.byDispatch('d1')?.status).toBe('running');
+});
+it('acks a delivery even when worker-release fails', async () => {
+  const { loop, orca, store } = setup();
+  orca.call.mockRejectedValueOnce(new Error('release refused'));
+  await expect(loop.processDelivery({ messages: [done] })).resolves.toBeUndefined();
+  expect(store.byDispatch('d1')?.status).toBe('done');
 });
 it('does not post a fabricated success for a completion without an explicit outcome', async () => {
   const { loop, slack, store, orca } = setup();

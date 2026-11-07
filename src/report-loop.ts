@@ -39,9 +39,12 @@ export class ReportLoop {
         this.store.saveQuestion(message.id, thread.thread_ts, options(message), slackTs);
       }
       if (['done', 'stopped'].includes(thread.status)) continue;
-      if (message.type === 'worker_done' || failed) {
-        await react(this.slack, thread.channel, thread.thread_ts, failed ? 'x' : 'white_check_mark');
-        await this.orca.call('worker-release', ['--dispatch', thread.dispatch_id]);
+      if (failed) await react(this.slack, thread.channel, thread.thread_ts, 'x');
+      // An escalation is not a settlement: the worker is still live and waits for a human (!stop or a reply), so only worker_done releases.
+      if (message.type === 'worker_done') {
+        if (!failed) await react(this.slack, thread.channel, thread.thread_ts, 'white_check_mark');
+        try { await this.orca.call('worker-release', ['--dispatch', thread.dispatch_id]); }
+        catch (error) { this.log('release_error', error); } // a failed release must not block the ack, or the delivery replays forever
         if (!['done', 'stopped'].includes(this.store.byThread(thread.thread_ts)!.status)) this.store.setStatus(thread.thread_ts, failed ? 'failed' : 'done');
       }
     }
