@@ -9,8 +9,29 @@
 不替代 Linear/Jira，不做看板，不做 agent 之间互相叫醒。
 
 参考实现：`dnhynk/dev-infra` `apps/orca-slack-bridge`（MIT，TypeScript，46k 行 src / 52k 行测试，Windows only，韩文注释）。
-它主要是**出口**（PR 卡 / Run 卡 / 决策门卡 + 按钮回 `gate-resolve`），不是入口。我们抄它的 Orca 客户端、决策门、
-状态卡、健康检查；入口和线程→worker 的派发自己写。代码审读见 scratchpad `09-code-dev-infra-bridge.md`。
+代码审读（2026-11-07，gpt-6.1-sol，scratchpad `09-code-dev-infra-bridge.md`）核实：
+
+- **纯出口**。没有任何 `worker-start` / `worktree create` / `agent launch` 调用；普通 Slack 消息直接丢弃，只有决策门按钮、
+  门的"自由输入"modal、终端提示卡三种入口（`src/cli.ts:2182`）。入口和线程→worker 派发必须自己写。
+- **macOS 跑不起来**。启动时的快照租约 `platform !== 'linux'` 直接抛错（`src/operational/status-capability.ts:1271`），
+  owner 锁要 `/usr/bin/flock`，channel 默认 Windows 命名管道。不是加个 launchd 包一层就行。
+- 本地实测：`pnpm install` 过，`tsc` 过，vitest **84 失败 / 1705 通过 / 30 跳过**（Node 25.8，包要求 ≥26；失败多为平台围栏）。
+- god files：`store/sqlite.ts` 8281 行、`cli.ts` 2673、`orca/client.ts` 1550、`slack/socket.ts` 1008。**不整文件抄**。
+- 真正值得拿的是它对 `orca orchestration` 的实测结论（见下"Orca CLI 实测"）和几个小文件：`orca/envelope.ts`（71 行）、
+  `orca/coerce.ts`（110）、`gate/actions.ts`（56）、`gate/render.ts`（198）、`operational/health.ts`（156）。
+  Socket Mode 用 `@slack/bolt`，不抄它 1008 行的 socket.ts。
+
+### Orca CLI 实测（来自 dnhynk 注释，M=他实测，C=他实现的契约）
+
+1. M/C `check` 默认就消费并标记 delivery，`--ack` 只是确认；观察者**别用 `check`**，用 `inbox`（`src/orca/client.ts:1330`）。→ 我们的回报循环是唯一消费者，用 `check --wait`；任何只读查询走 `inbox`/`worker-list`。
+2. M `inbox` 无分页；`--terminal run:<id>` 过滤收件人；563 条 worker_done 全走这条路（`:1349`）。
+3. M `worker_done` 的 `body` 是三句话，`payload` 是 **JSON 字串**（taskId/dispatchId/outcome/filesModified），`thread_id=null`（`:1243`）。→ 解析要 `JSON.parse(payload)`。
+4. M `question` 自成线程；回答是同 `thread_id` 的 status 行；**没有直接读 question 的命令**（`:1445`）。
+5. M `deps/options/result` 可能是 JSON 字串而不是对象（`coerce.ts:4`）；时间戳混用 naive SQL 和 ISO 毫秒（`client.ts:255`）。
+6. M `worker-list` 含历史资源，`agentWait` 只有 `worker-show` 给；只查活跃 dispatch（`:838`）。Orca 1.4.216 起每页 100 条（`:845`）。
+7. C `gate-resolve --from <coordinator> --id <gate> --resolution <text> --retry-request <uuid> --json`（`:782`）。
+8. M `terminal send` 传原始转义字节，Enter=13；Codex 的 `--interrupt` 会杀掉空闲 TUI，所以叫醒用 `--enter`（`terminal/client.ts:9`）。
+9. 设计教训：Slack 3 秒 ACK 先于任何 Orca 调用；先落盘再叫醒；叫醒只带 id 不带内容；不确定就显示 unknown 不编成功。
 
 ## 术语
 
@@ -49,8 +70,8 @@
 
 | # | 功能 | 说明 | 抄哪里 |
 |---|---|---|---|
-| 13 | 决策门卡 | coordinator `decision_gate` → 一个选项一个按钮 → `orca orchestration gate-resolve` → 叫醒 coordinator | dnhynk `src/gate/*` |
-| 14 | 状态卡 + 限频 | 每线程**一条**状态消息，heartbeat/status 更新靠 `chat.update` 改它，不刷屏；里程碑 ≤1 条/分钟 | dnhynk `src/run/*`；facumoyano 限频 |
+| 13 | 决策门卡 | coordinator `decision_gate` → 一个选项一个按钮 → `orca orchestration gate-resolve` → 叫醒 coordinator | dnhynk `gate/actions.ts`、`gate/render.ts` 抄；`gate/resolve.ts` 只参考（先落盘再 resolve 再叫醒的状态机） |
+| 14 | 状态卡 + 限频 | 每线程**一条**状态消息，heartbeat/status 更新靠 `chat.update` 改它，不刷屏；里程碑 ≤1 条/分钟 | dnhynk `run/publish.ts` 的内容指纹（没变不发）只参考；facumoyano 限频 |
 | 15 | 角色选择 | `@bot research: …` / `code:` / `review:` 前缀选路由表的行；表从 `stometa-mode` 仓库读，不在桥里复制 | — |
 | 16 | 运行控制 | 硬 deadline（默认 90 min）到点 `worker-stop` 并回帖；重复任务检测（同一 issue URL 已在别的线程 → 指过去） | facumoyano 重复检测 |
 | 17 | 危险命令审批 | agent 的 hook（Claude PreToolUse / Codex approval）把 force-push、`rm -rf`、`git reset --hard` 等打到 Slack 按钮，只有 owner 能批 | pawel-kotowski 的 gate；需每家 agent 分别接 |
