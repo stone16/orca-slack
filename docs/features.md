@@ -33,6 +33,28 @@
 8. M `terminal send` 传原始转义字节，Enter=13；Codex 的 `--interrupt` 会杀掉空闲 TUI，所以叫醒用 `--enter`（`terminal/client.ts:9`）。
 9. 设计教训：Slack 3 秒 ACK 先于任何 Orca 调用；先落盘再叫醒；叫醒只带 id 不带内容；不确定就显示 unknown 不编成功。
 
+### 第二个参照：`pawel-kotowski/slack-agent`（Python 单文件 2,222 行，无 LICENSE → 只学设计不抄代码）
+
+审读 2026-11-07（gpt-6.1-sol，scratchpad `10-code-slack-agent.md`）。它是真正的**入口**桥：Slack → `orca worktree create` →
+`orca terminal create --command claude …`，任务文本走 Claude 的 argv，后续消息走 `terminal send`——完全不用 `orca orchestration`，
+生命周期全靠终端文本，这是我们不学的地方。但下面这些是它一周真机跑出来的教训，**直接改我们的 P0/P1**：
+
+| 教训 | 出处 | 对我们的改动 |
+|---|---|---|
+| 一条消息同时触发 `app_mention` 和 `message.channels`，顺序不定、event_id 不同 | `NOTES.md:110-113` | P0 行 3：去重键加 `UNIQUE(channel, ts)`，不能只靠 event_id（已发给 P0 worker） |
+| "没人看终端"：agent 的提问工具（Claude `AskUserQuestion`）会渲染在终端里；要用 `--disallowedTools=AskUserQuestion` 关掉 | `NOTES.md:18-26` | P0 行 1：spec 头部写明"别用交互提问工具，用 orchestration question" |
+| 按钮答案回给 agent 时**带上原问题**，多轮之后才看得懂 | `NOTES.md:22-26` | P0 行 6：`reply --body` 内容 = `<user> chose "A" in answer to "<question>"` |
+| 审批疲劳：一周 17 次审批 15 次放行，只有 4 次是真的（PR merge/close）；`--force-with-lease`、`rm -rf` 构建产物、heredoc 里的文字全是误报；`gh api …/merge-async` 正则漏掉 | `NOTES.md:27-38` | P1 行 17：门要 shlex 拆命令、heredoc 剔掉、看 `bash -c`/`eval`/`$(…)`、`cd` 跟踪；只拦不可逆的；显示 agent 的 Bash description 当理由；"本任务内同类都批" |
+| SDK 重连在机器睡眠后会"活着但不通" | `NOTES.md:129-136`；`slack-agent:1838-1848` | P0 行 11：每 30 s 探一次连通性，>90 s 不通就 exit 让 launchd 重启，别信 SDK 的 reconnect |
+| `starting` 期间的跟进消息被丢弃 | `slack-agent:1491-1492` | P0 行 4：worker 没就绪前的跟进进队列，就绪后补发 |
+| 关闭任务时若有未推送提交或脏文件，**保留 worktree** 并告知 | `slack-agent:1676-1683` | P0 行 7/9：`worker-release` 前查 `git status --porcelain` + `@{upstream}..HEAD`，有东西就不删 worktree |
+| `orca worktree create --setup skip` 返回后 seeded tab 还会晚一步出现 | `NOTES.md:66-72` | 我们走 `worker-start` 不碰这个；记着就行 |
+| Slack app 用 **manifest.json** 发布，不手点 scope | `manifest.example.json` | `docs/setup.md` 改成给 manifest 文件 |
+| Orca 包装层忽略 exit code、接受任意 JSON | `slack-agent:481-486` | 反例：我们的 `orca.ts` 对 `ok:false` 和非零 exit 必须抛 |
+
+它有、我们明确不做的：10 秒 diff watcher 贴 Code tab、Tailscale Funnel 实时面板、每 workspace 一个 PostgreSQL 的 app 预览、
+wake 分类器（LLM 判断陌生人消息能不能叫醒 agent）、transcript 复活。
+
 ## 术语
 
 - **dispatch**：Orca 的一次任务尝试（`ctx_…`）。线程状态表的主键之一。
@@ -47,15 +69,15 @@
 |---|---|---|---|---|---|---|
 | 1 | 派发 | 配置频道里 `@bot <任务>`（新消息或线程首条） | 路由 `channel → repo`（yaml）；选默认角色；开新 worktree 起 worker | `orca orchestration worker-start --spec <text> --worktree new --repo … --agent … --model … --effort …` | ≤1 s 加 👀；回帖 `dispatch ctx_… · worktree …` | 写入 threads 表 |
 | 2 | 线程状态 | 每次派发 | `thread_ts → {run, task, dispatch, worktree, repo, requester, status, created_at}` | — | — | SQLite 单文件；进程重启不丢 |
-| 3 | 幂等 | Slack 重发 / 重连 | 同一 `event_id` 或同一 `message ts` 只派一次 | — | — | events 表 |
-| 4 | 跟进 | 线程内后续消息 | 有未答 question → `reply`；否则作为高优先级 status 发给 dispatch | `orca orchestration reply --id …` / `send --to <dispatch> --type status --priority high` | 加 ✅ 表示已送达（送达≠已读，文案要写清） | — |
+| 3 | 幂等 | Slack 重发 / 重连；同一消息的 `app_mention` + `message` 双事件 | 同一 `event_id` 只处理一次；同一 `(channel, ts)` 只派一次 | — | — | events 表 + threads 上 `UNIQUE(channel, ts)` |
+| 4 | 跟进 | 线程内后续消息 | 有未答 question → `reply`；否则作为高优先级 status 发给 dispatch；worker 未就绪时先排队 | `orca orchestration reply --id …` / `send --to <dispatch> --type status --priority high` | 加 ✅ 表示已送达（送达≠已读，文案要写清） | — |
 | 5 | 回报循环 | 进程内**唯一**消费者 | `check --wait --types worker_done,question,escalation,merge_ready,decision_gate` → 按 dispatch 找线程 → 回帖 → `--ack` | `orca orchestration check --wait --ack … --json` | 见 6–8 | 处理完再 ack；崩溃后重放 |
 | 6 | 提问卡 | worker `question` | ≤5 个选项按钮 + "自由输入"；点按钮或在线程回复 → `reply` | `reply --id <message_id> --body …` | Block Kit 按钮；点过后卡变灰、显示谁答的 | pending_questions 表 |
 | 7 | 完成 | `worker_done --outcome succeeded` | 三句摘要 + PR 链接 + receipt 路径；✅ 反应；释放 worker | `worker-release --dispatch …` | 回帖 | status=done |
 | 8 | 失败 | `worker_done --outcome failed` / `escalation` | ❌ + 摘要 + 终端尾 40 行 | `worker-read --dispatch … --source terminal` | 回帖 | status=failed；**不**自动重试 |
 | 9 | 停止 | 线程里 ⏹ 按钮或 `!stop` | 停 worker，释放，回帖 | `worker-stop` → `worker-release` | 按钮 | status=stopped |
 | 10 | 权限 | 任何入口 | 只有配置里的 user id 能派发/停止/答题；其他人收到一句拒绝 | — | ephemeral 回复 | 配置文件 |
-| 11 | 运维 | 进程生命周期 | launchd plist；heartbeat 文件（给 `orca_automations` watchdog 看）；Socket Mode 自动重连；fatal → 发到运维频道 | — | #ops 频道 | 日志按大小滚动 |
+| 11 | 运维 | 进程生命周期 | launchd plist；heartbeat 文件（给 `orca_automations` watchdog 看）；每 30 s 探 Socket 连通，>90 s 不通就退出让 launchd 重启；fatal → 发到运维频道 | — | #ops 频道 | 日志按大小滚动 |
 | 12 | 凭据 | 启动 | token 从 macOS keychain（现有 `slack-gateway` / `bot-token`）读，配置文件只放频道/用户 id；日志永不打 token | — | — | — |
 
 **P0 验收（手动，一次跑通）**
