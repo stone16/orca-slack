@@ -4,3 +4,4 @@ dist/
 *.sqlite-*
 config.local.*
 .env
+.lavish/

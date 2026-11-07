@@ -1,6 +1,6 @@
 # orca-slack — 功能点清单
 
-日期：2026-11-07。状态：草案，待 Stometa 砍。
+日期：2026-11-07。状态：**11-07 晚已按 `docs/feature-matrix.md` 的 64 条对齐**；下面表格是对齐前的草案，差异见文末「对齐后的改动」。
 
 ## 一句话
 
@@ -128,3 +128,19 @@ wake 分类器（LLM 判断陌生人消息能不能叫醒 agent）、transcript 
 1. TS 还是 Python？（上面默认 TS）
 2. 第一个试点用哪个 Slack workspace / 频道，哪个 repo 做 P0 验收任务？（默认：#leilei-orca + 一个个人 repo）
 3. GitHub 远端叫什么、放哪个 org？（本地先建，不推）
+
+## 对齐后的改动（2026-11-07，来源 `docs/feature-matrix.md` §对齐结果）
+
+P0 变化：
+- 2.2 → **一线程多 dispatch 复用 worktree**：线程完成后再 @ = 同 worktree 新开 dispatch；store 从 `threads` 1:1 改成 `threads 1:N dispatches` + 当前 dispatch 指针。
+- 6.4 → **P0**：先做 git 侧护栏（worktree `pre-push` hook 拦 force / 推 main + 仓库 branch protection），对所有 agent 生效。
+- 6.6 → 门的 hooks/settings 放 worktree 外（runner 状态目录，`--settings` 传入），agent 改 worktree 里的东西不影响门。
+- 5.2 → release 不删 worktree；14 天空闲后 `worktree rm`，删前把 transcript 路径 + receipt 写进线程记录。
+- 11.6 → **桥统一转发**，worker 只发 orchestration 消息，不直贴 Slack。
+- 验收加一条：端到端延迟测量（Slack 消息 → worker 收到；worker_done → 线程出现）。
+
+P1 变化：1.6 LLM 判意图 + eval（先用 P0 收样本）· 1.7 owner DM 入口 · 5.7 14 天空闲关闭 · 6.2 非白名单 hold 开关（默认关）· 7.3 并发不限。
+
+先不定：1.4 ticket 当任务源（取决于 1.8）· 6.6 · 7.2 成本上限 · **1.8 外环需求代理**（新）。
+
+原则：两环（外环聊需求 → Linear ticket；内环 stometa-mode/poteto-mode）· 一个频道 + 模型按 mapping 选 repo · 多厂商按 stometa-mode 路由表 · SQLite 不换 Postgres · 不另建 queue · launchd 不换 Docker · PR 暂用本人 gh 身份。
