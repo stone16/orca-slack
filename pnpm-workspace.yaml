@@ -1,0 +1,6 @@
+allowBuilds:
+  esbuild: true
+publicHoistPattern:
+  - '@types/node'
+overrides:
+  '@types/node': ^24.0.0

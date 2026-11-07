@@ -1,0 +1,14 @@
+{
+  "channels": {
+    "C0123456789": {
+      "repo": "name:orca-slack",
+      "agent": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    }
+  },
+  "allowedUsers": ["U0123456789"],
+  "opsChannel": "C9876543210",
+  "heartbeatFile": "~/Library/Application Support/orca-slack/heartbeat",
+  "dbFile": "~/Library/Application Support/orca-slack/state.sqlite"
+}
