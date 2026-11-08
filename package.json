@@ -8,7 +8,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "test:orca": "node scripts/orca-integration.mjs"
+    "test:orca": "npm run build && node scripts/orca-integration.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
