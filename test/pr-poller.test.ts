@@ -108,3 +108,19 @@ test('one failing repository does not prevent discovering another worktree PR', 
   expect(await poller.poll()).toEqual({ changes: [{ ...apiPr, id: apiPr.url, worktreeId: 'api-tree' }],
     failures: [{ worktreeId: 'tree', reason: 'GitHub poll failed' }] });
 });
+
+test('poll enriches an existing ledger PR without duplicating its link or changing its identity', async () => {
+  const store = ledger();
+  store.savePullRequest({ id: 'existing-pr', worktreeId: 'tree', url: open.url });
+  const result = await new PrPoller(store, async () => JSON.stringify([open])).poll();
+  expect(result.changes).toEqual([{ ...open, id: 'existing-pr', worktreeId: 'tree' }]);
+  expect(store.pullRequests('thread')).toEqual([{ id: 'existing-pr', worktreeId: 'tree', url: open.url }]);
+});
+
+test('poll accepts the full branch ref reported by Orca and queries gh with its branch name', async () => {
+  const store = ledger();
+  store.saveWorktree({ id: 'api-tree', threadId: 'thread', repository: 'example/api', branch: 'refs/heads/feat/api' });
+  const calls: string[][] = [];
+  await new PrPoller(store, async (_program, args) => { calls.push(args); return '[]'; }).poll();
+  expect(calls[1].slice(4, 6)).toEqual(['--head', 'feat/api']);
+});

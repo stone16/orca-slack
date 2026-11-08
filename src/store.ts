@@ -28,6 +28,11 @@ export interface Inbound extends SlackEvent {
 export interface ObservedPullRequest extends PullRequest {
   number: number; state: 'OPEN' | 'CLOSED' | 'MERGED'; headRefOid: string;
 }
+export interface CleanupReceipt {
+  id: string; worktreeId: string; threadId: string; worktree: Worktree; instanceId: string; identity: string; path: string;
+  finalCommit: string; pullRequests: ObservedPullRequest[]; sessions: LeadSession[]; reports: Report[];
+  confirmedBy: string; savedAt: string; state: 'saved' | 'deleted'; removalReceipt?: unknown;
+}
 
 export interface RoutingSample {
   threadId: string; text: string; repository: string | null;
@@ -79,7 +84,11 @@ export class Store {
         UNIQUE(installationId, eventId));
       CREATE TABLE IF NOT EXISTS pr_observations (
         id TEXT PRIMARY KEY REFERENCES pull_requests(id), number INTEGER NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('OPEN', 'CLOSED', 'MERGED')), headRefOid TEXT NOT NULL);`);
+        state TEXT NOT NULL CHECK(state IN ('OPEN', 'CLOSED', 'MERGED')), headRefOid TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS cleanup_receipts (
+        worktreeId TEXT PRIMARY KEY, threadId TEXT NOT NULL, record TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('saved', 'deleted')), removalReceipt TEXT,
+        FOREIGN KEY(worktreeId, threadId) REFERENCES worktrees(id, threadId));`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS routing_samples (
         threadId TEXT PRIMARY KEY REFERENCES threads(id), text TEXT NOT NULL, repository TEXT,
@@ -312,8 +321,9 @@ export class Store {
     });
   }
   trackedWorktrees(threadId?: string): Worktree[] {
-    return (threadId === undefined ? this.db.prepare('SELECT * FROM worktrees ORDER BY rowid').all()
-      : this.worktrees(threadId)) as unknown as Worktree[];
+    return this.db.prepare(`SELECT w.* FROM worktrees w WHERE (? IS NULL OR w.threadId=?)
+      AND NOT EXISTS (SELECT 1 FROM cleanup_receipts c WHERE c.worktreeId=w.id AND c.state='deleted')
+      ORDER BY w.rowid`).all(threadId ?? null, threadId ?? null) as unknown as Worktree[];
   }
   observedPullRequests(threadId: string): ObservedPullRequest[] {
     return this.db.prepare(`SELECT p.*, o.number, o.state, o.headRefOid FROM pull_requests p
@@ -323,9 +333,11 @@ export class Store {
   observePullRequests(prs: ObservedPullRequest[]): ObservedPullRequest[] {
     return this.transaction(() => {
       const changes: ObservedPullRequest[] = [];
-      for (const pr of prs) {
+      for (const observed of prs) {
         const existing = this.db.prepare(`SELECT p.*, o.number, o.state, o.headRefOid FROM pull_requests p
-          LEFT JOIN pr_observations o ON o.id=p.id WHERE p.id=?`).get(pr.id);
+          LEFT JOIN pr_observations o ON o.id=p.id WHERE p.id=? OR (p.url=? AND p.worktreeId=?) LIMIT 1`)
+          .get(observed.id, observed.url, observed.worktreeId);
+        const pr = { ...observed, id: existing ? existing.id as string : observed.id };
         if (existing && existing.worktreeId !== pr.worktreeId) throw new Error('Pull request belongs to another worktree');
         if (existing && existing.url === pr.url && existing.number === pr.number &&
             existing.state === pr.state && existing.headRefOid === pr.headRefOid) continue;
@@ -338,6 +350,25 @@ export class Store {
       }
       return changes;
     });
+  }
+  saveCleanupReceipt(receipt: Omit<CleanupReceipt, 'state' | 'removalReceipt'>): CleanupReceipt {
+    this.db.prepare(`INSERT OR IGNORE INTO cleanup_receipts VALUES (?, ?, ?, 'saved', NULL)`)
+      .run(receipt.worktreeId, receipt.threadId, JSON.stringify(receipt));
+    return this.cleanupReceipt(receipt.worktreeId)!;
+  }
+  cleanupReceipt(worktreeId: string): CleanupReceipt | undefined {
+    const row = this.db.prepare('SELECT * FROM cleanup_receipts WHERE worktreeId=?').get(worktreeId);
+    if (!row) return undefined;
+    return { ...JSON.parse(row.record as string), state: row.state,
+      ...(row.removalReceipt === null ? {} : { removalReceipt: JSON.parse(row.removalReceipt as string) }) };
+  }
+  cleanupReceipts(threadId: string): CleanupReceipt[] {
+    return this.db.prepare('SELECT worktreeId FROM cleanup_receipts WHERE threadId=? ORDER BY rowid').all(threadId)
+      .map(row => this.cleanupReceipt(row.worktreeId as string)!);
+  }
+  markCleanupDeleted(worktreeId: string, receipt: unknown): void {
+    this.db.prepare("UPDATE cleanup_receipts SET state='deleted', removalReceipt=? WHERE worktreeId=? AND state='saved'")
+      .run(JSON.stringify(receipt), worktreeId);
   }
   close(): void { this.db.close(); }
 }

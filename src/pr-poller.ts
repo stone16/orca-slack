@@ -20,7 +20,7 @@ export class PrPoller {
     const result: PollResult = { changes: [], failures: [] };
     for (const tree of this.store.trackedWorktrees(threadId)) {
       try {
-        const output = await this.run('gh', ['pr', 'list', '--repo', tree.repository, '--head', tree.branch,
+        const output = await this.run('gh', ['pr', 'list', '--repo', tree.repository, '--head', tree.branch.replace(/^refs\/heads\//, ''),
           '--state', 'all', '--limit', '1000', '--json', 'number,url,state,headRefOid']);
         const prs = JSON.parse(output) as Omit<ObservedPullRequest, 'id' | 'worktreeId'>[];
         if (!Array.isArray(prs) || prs.length >= 1000 || prs.some(pr => !pr ||
