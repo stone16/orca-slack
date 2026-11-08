@@ -4,7 +4,7 @@ Slack thread ⇄ [Orca](https://onorca.dev) orchestration bridge. One piece of w
 
 The Bridge runs on the machine that runs Orca. Slack is the entry and reporting surface; Orca runs the agents. The product behavior is defined in [docs/brief.md](docs/brief.md).
 
-Status: M1 slice 1 provides the tested TypeScript core with scripted Slack delivery. Live Slack integration and deployment remain for milestone acceptance.
+Status: the tested TypeScript core includes Slack cards and a Bolt Socket Mode adapter. Live workspace acceptance and deployment remain for the milestone acceptance task.
 
 - Product brief, the baseline for what we build: [docs/brief.md](docs/brief.md)
 - Requirements and priorities: [docs/features.md](docs/features.md)
@@ -37,6 +37,7 @@ npm run build
 [Store](src/store.ts#L38) uses `node:sqlite` for threads, worktrees, pull requests, lead sessions, decisions, and delivery records.
 [Bridge](src/slack.ts#L16) saves inbound Slack messages before forwarding and gates actions by allowlist and owner.
 The caller supplies normalized Slack events, refusal delivery, and the authorized retry, cleanup, and repository-switch handlers.
+The [Slack adapter guide](docs/slack.md) describes rendering, saved card timestamps, and the Socket Mode boundary.
 
 Use one [ReportLoop](src/report-loop.ts#L7) per Orca Run and one Bridge instance per Slack app.
 At startup, call `ReportLoop.recover()` and `Bridge.replay()` before scheduling `ReportLoop.poll()`.

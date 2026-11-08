@@ -5,6 +5,7 @@ import { Store, type SlackEvent } from './store.js';
 export type { SlackEvent } from './store.js';
 export type Action = { threadId: string; channel: string; user: string } & (
   { actionId: 'decision'; decisionId: string; option: string } |
+  { actionId: 'log-tail'; triggerId: string } |
   { actionId: 'retry' | 'cleanup' | 'switch-repository' | 'stop' }
 );
 export class Bridge {
