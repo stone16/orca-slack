@@ -34,6 +34,7 @@ export interface CleanupReceipt {
   confirmedBy: string; savedAt: string; state: 'saved' | 'deleted'; removalReceipt?: unknown;
 }
 export interface PullRequestChange { id: number; pullRequest: ObservedPullRequest }
+export interface SlackCard { threadId: string; key: string; ts: string; view: string }
 
 export interface RoutingSample {
   threadId: string; text: string; repository: string | null;
@@ -105,6 +106,16 @@ export class Store {
         terminalSource TEXT NOT NULL, terminalCursor TEXT NOT NULL, frozen INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lead_launches (
         threadId TEXT PRIMARY KEY REFERENCES threads(id), id TEXT NOT NULL, dispatchId TEXT);`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS slack_cards (
+        threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, ts TEXT NOT NULL, view TEXT NOT NULL,
+        PRIMARY KEY(threadId, key));
+      CREATE TABLE IF NOT EXISTS slack_reactions (
+        inboundKey TEXT NOT NULL REFERENCES inbound(key), name TEXT NOT NULL,
+        PRIMARY KEY(inboundKey, name));
+      CREATE TABLE IF NOT EXISTS slack_actions (
+        threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, user TEXT NOT NULL,
+        PRIMARY KEY(threadId, key));`);
   }
   private transaction<T>(work: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -389,6 +400,25 @@ export class Store {
   }
   markPullRequestChangeDelivered(id: number): void {
     this.db.prepare('DELETE FROM pull_request_changes WHERE id=?').run(id);
+  }
+  saveSlackCard(card: SlackCard): void {
+    this.db.prepare(`INSERT INTO slack_cards VALUES (?, ?, ?, ?) ON CONFLICT(threadId, key)
+      DO UPDATE SET ts=excluded.ts, view=excluded.view`).run(card.threadId, card.key, card.ts, card.view);
+  }
+  slackCard(threadId: string, key: string): SlackCard | undefined {
+    return this.db.prepare('SELECT * FROM slack_cards WHERE threadId=? AND key=?').get(threadId, key) as SlackCard | undefined;
+  }
+  hasSlackReaction(inboundKey: string, name: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM slack_reactions WHERE inboundKey=? AND name=?').get(inboundKey, name);
+  }
+  saveSlackReaction(inboundKey: string, name: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO slack_reactions VALUES (?, ?)').run(inboundKey, name);
+  }
+  slackAction(threadId: string, key: string): string | undefined {
+    return this.db.prepare('SELECT user FROM slack_actions WHERE threadId=? AND key=?').get(threadId, key)?.user as string | undefined;
+  }
+  saveSlackAction(threadId: string, key: string, user: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO slack_actions VALUES (?, ?, ?)').run(threadId, key, user);
   }
   close(): void { this.db.close(); }
 }

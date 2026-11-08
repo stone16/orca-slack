@@ -1,0 +1,7 @@
+{
+  "type": "block_actions", "api_app_id": "A1", "team": { "id": "T1" },
+  "user": { "id": "U1" }, "channel": { "id": "C1" }, "trigger_id": "fixture-trigger",
+  "container": { "type": "message", "channel_id": "C1", "message_ts": "10.0" },
+  "message": { "type": "message", "ts": "10.0", "text": "Choose a next step" },
+  "actions": [{ "type": "button", "action_id": "decision_0", "block_id": "choices", "text": { "type": "plain_text", "text": "Continue" }, "value": "{\"threadId\":\"thread\",\"decisionId\":\"question\",\"option\":\"Continue\"}", "action_ts": "1700000004.000001" }]
+}
