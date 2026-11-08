@@ -100,7 +100,7 @@ The earlier prototype remains on branch `stone/p0-bridge`.
 
 ## Route threads and manage leads
 
-Use [Leads](src/leads.ts#L16) with a [LeadCli](src/lead-orca.ts#L10), the existing Store, one Bridge-owned Run ID, configured repository IDs and aliases, bot ID, and agent ID. Pass that Leads instance as the final Bridge constructor argument. The existing inbound and permission handling remains the entry point.
+Use [Leads](src/leads.ts#L16) with a [LeadCli](src/lead-orca.ts#L10), the existing Store, one Bridge-owned Run ID, configured repository IDs and aliases, bot ID, and agent ID. Pass that Leads instance as the seventh Bridge constructor argument. The existing inbound and permission handling remains the entry point.
 
 Call `leads.report(report)` from the ReportLoop delivery callback before rendering the report. Schedule `leads.poll()` to update durable lead events from Orca read evidence. Active sessions and unresolved questions are read from SQLite after restart. The [integration driver](scripts/lead-integration.mjs#L34) shows the composition with scripted Slack events and real Orca execution.
 
@@ -110,3 +110,63 @@ node scripts/lead-integration.mjs
 ```
 
 The driver uses only a disposable repository, worktree, terminal, and Run. It asks one question, saves and answers the decision, receives completion, and removes its live resources.
+
+## Retain threads before repository selection
+
+[UnboundThreads](src/unbound-threads.ts) stores original Slack messages in the ignored `data/threads/` directory.
+Pass it as the eighth Bridge constructor argument, after the optional Leads instance.
+Bridge registers the Store so retention checks current repository bindings even when no new Slack message arrives.
+
+```ts
+const unboundThreads = new UnboundThreads({
+  checkout,
+  archiveDirectory: settings.archiveDirectory,
+  retentionDays: settings.retentionDays,
+});
+const bridge = new Bridge(orca, slack, store, allowedUsers, botId, undefined, leads, unboundThreads);
+```
+
+The archive location has no default and belongs in operator configuration.
+It must exist on a mounted filesystem with a different device identity from local thread storage.
+An absent directory or an unmounted directory stub keeps records local for the next run.
+The code never creates the configured archive directory.
+Overlapping storage paths, including aliases and nested directories, are rejected.
+
+Call `archiveExpired()` from the host's retention job.
+The default retention is 30 days after the last activity; `retentionDays` accepts a positive number.
+Bound threads stay out of the sweep.
+Standalone users can supply `isBound(id)` in the options or call `trackBindings(store)`.
+
+`read(id)` merges local and available archived history, deduplicates Slack redelivery, and orders messages by timestamp.
+`append(thread, event)` and `reactivate(id)` durably save that merged history locally before removing the archived snapshot.
+Replies received while the archive is unavailable stay local and merge when the mounted archive returns.
+
+Archive writes use a verified temporary file and atomic rename before deleting the unchanged local source.
+Older valid archives merge into the replacement; damaged archive files are preserved with a `.recovery-` suffix for operator inspection.
+One corrupt local record is reported without blocking the remaining records.
+A SQLite lock under `data/` serializes reads, reactivation, and retention across processes and releases on process exit.
+Processes using the same archive namespace must share the checkout and its lock database.
+
+The archive tests use `hdiutil` on macOS to mount and remove a disposable disk image.
+They also exercise an ordinary local directory as an unmounted stub and a full archive filesystem.
+
+## Protect Git pushes across worktrees
+
+[installPushGuard](src/push-guard.ts) accepts a repository checkout and a configured hooks directory outside every worktree.
+It installs an executable `pre-push` hook and sets shared local `core.hooksPath` for existing and future worktrees.
+Conflicting hook configuration and existing hooks that would otherwise be disabled are preserved by refusing installation.
+Installation on real repositories belongs to deployment.
+
+The hook queries the destination's symbolic `HEAD` and blocks every default-branch update or deletion.
+It rejects non-fast-forward feature updates, including history rewrites requested with `--force` or `--force-with-lease`.
+New feature branches, new tags, and feature fast-forwards remain allowed even with force flags because they rewrite no history.
+Unknown defaults, unavailable ancestry, feature deletions, replacement or deletion of existing tags, and arbitrary ref namespaces fail closed.
+
+A client hook can be bypassed with `--no-verify` or Git configuration, so server branch protection remains the backstop.
+The hook cannot distinguish a normal push from the same new-ref or fast-forward push with a force flag.
+
+Run the real push drive against disposable repositories:
+
+```sh
+PUSH_GUARD_EVIDENCE=1 npm test -- test/push-guard.test.ts --reporter=verbose --silent=false
+```
