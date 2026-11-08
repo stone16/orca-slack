@@ -332,30 +332,17 @@ export class Store {
       WHERE w.threadId=? ORDER BY p.rowid`).all(threadId) as unknown as ObservedPullRequest[];
   }
   observePullRequests(prs: ObservedPullRequest[]): ObservedPullRequest[] {
-    return this.transaction(() => {
-      const changes: ObservedPullRequest[] = [];
-      for (const observed of prs) {
-        const existing = this.db.prepare(`SELECT p.*, o.number, o.state, o.headRefOid FROM pull_requests p
-          LEFT JOIN pr_observations o ON o.id=p.id WHERE p.id=? OR p.url=? LIMIT 1`)
-          .get(observed.id, observed.url);
-        const pr = { ...observed, id: existing ? existing.id as string : observed.id };
-        if (existing && existing.worktreeId !== pr.worktreeId) throw new Error('Pull request belongs to another worktree');
-        if (existing && existing.url === pr.url && existing.number === pr.number &&
-            existing.state === pr.state && existing.headRefOid === pr.headRefOid) continue;
-        this.db.prepare(`INSERT INTO pull_requests VALUES (?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET url=excluded.url`).run(pr.id, pr.worktreeId, pr.url);
-        this.db.prepare(`INSERT INTO pr_observations VALUES (?, ?, ?, ?) ON CONFLICT(id)
-          DO UPDATE SET number=excluded.number, state=excluded.state, headRefOid=excluded.headRefOid`)
-          .run(pr.id, pr.number, pr.state, pr.headRefOid);
-        changes.push(pr);
-      }
-      return changes;
-    });
+    return this.transaction(() => this.writePullRequests(prs));
   }
   saveCleanupReceipt(receipt: Omit<CleanupReceipt, 'state' | 'removalReceipt'>): CleanupReceipt {
-    this.db.prepare(`INSERT OR IGNORE INTO cleanup_receipts VALUES (?, ?, ?, 'saved', NULL)`)
-      .run(receipt.worktreeId, receipt.threadId, JSON.stringify(receipt));
-    return this.cleanupReceipt(receipt.worktreeId)!;
+    return this.transaction(() => {
+      const previous = this.cleanupReceipt(receipt.worktreeId);
+      if (previous) return previous;
+      this.writePullRequests(receipt.pullRequests);
+      this.db.prepare(`INSERT INTO cleanup_receipts VALUES (?, ?, ?, 'saved', NULL)`)
+        .run(receipt.worktreeId, receipt.threadId, JSON.stringify(receipt));
+      return this.cleanupReceipt(receipt.worktreeId)!;
+    });
   }
   cleanupReceipt(worktreeId: string): CleanupReceipt | undefined {
     const row = this.db.prepare('SELECT * FROM cleanup_receipts WHERE worktreeId=?').get(worktreeId);
@@ -370,6 +357,25 @@ export class Store {
   markCleanupDeleted(worktreeId: string, receipt: unknown): void {
     this.db.prepare("UPDATE cleanup_receipts SET state='deleted', removalReceipt=? WHERE worktreeId=? AND state='saved'")
       .run(JSON.stringify(receipt), worktreeId);
+  }
+  private writePullRequests(prs: ObservedPullRequest[]): ObservedPullRequest[] {
+    const changes: ObservedPullRequest[] = [];
+    for (const observed of prs) {
+      const existing = this.db.prepare(`SELECT p.*, o.number, o.state, o.headRefOid FROM pull_requests p
+        LEFT JOIN pr_observations o ON o.id=p.id WHERE p.id=? OR p.url=? LIMIT 1`)
+        .get(observed.id, observed.url);
+      const pr = { ...observed, id: existing ? existing.id as string : observed.id };
+      if (existing && existing.worktreeId !== pr.worktreeId) throw new Error('Pull request belongs to another worktree');
+      if (existing && existing.url === pr.url && existing.number === pr.number &&
+          existing.state === pr.state && existing.headRefOid === pr.headRefOid) continue;
+      this.db.prepare(`INSERT INTO pull_requests VALUES (?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET url=excluded.url`).run(pr.id, pr.worktreeId, pr.url);
+      this.db.prepare(`INSERT INTO pr_observations VALUES (?, ?, ?, ?) ON CONFLICT(id)
+        DO UPDATE SET number=excluded.number, state=excluded.state, headRefOid=excluded.headRefOid`)
+        .run(pr.id, pr.number, pr.state, pr.headRefOid);
+      changes.push(pr);
+    }
+    return changes;
   }
   close(): void { this.db.close(); }
 }
