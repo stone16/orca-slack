@@ -1,6 +1,7 @@
 import type { Leads } from './leads.js';
 import type { Orca } from './orca.js';
 import { Store, type SlackEvent } from './store.js';
+import type { UnboundThreads } from './unbound-threads.js';
 
 export type { SlackEvent } from './store.js';
 export type Action = { threadId: string; channel: string; user: string } & (
@@ -12,7 +13,9 @@ export class Bridge {
   constructor(private orca: Orca,
     private slack: { refuse(channel: string, user: string): Promise<void>; ownerAction(action: Action): Promise<void> },
     private store: Store, private allowedUsers: readonly string[], private botId: string,
-    private afterSave: () => void | Promise<void> = () => {}, private leads?: Leads) {}
+    private afterSave: () => void | Promise<void> = () => {}, private leads?: Leads, private unboundThreads?: UnboundThreads) {
+    this.unboundThreads?.trackBindings(store);
+  }
 
   async event(event: SlackEvent): Promise<void> {
     if (event.botMessage || event.user === this.botId) return;
@@ -28,7 +31,9 @@ export class Bridge {
       threadTs, owner: event.user };
     const kind = this.text(event.text) === '!stop' ? 'stop'
       : thread.owner === event.user || mentioned ? 'prompt' : 'archive';
-    if (this.store.saveInbound(thread, event, kind)) await this.afterSave();
+    const saved = this.store.saveInbound(thread, event, kind);
+    if (!this.store.worktrees(thread.id).length) this.unboundThreads?.append(thread, event);
+    if (saved) await this.afterSave();
     await this.replay(thread.id);
   }
   private serial<T>(threadId: string, work: () => Promise<T>): Promise<T> {
