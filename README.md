@@ -127,9 +127,16 @@ const bridge = new Bridge(orca, slack, store, allowedUsers, botId, undefined, le
 ```
 
 The archive location has no default and belongs in operator configuration.
-It must exist on a mounted filesystem with a different device identity from local thread storage.
-An absent directory or an unmounted directory stub keeps records local for the next run.
-The code never creates the configured archive directory.
+After mounting the intended archive, create its marker once:
+
+```sh
+touch "$ARCHIVE_DIRECTORY/.orca-slack-archive"
+```
+
+The archive is available only while that regular marker file exists inside the configured directory.
+Create the marker on the mounted share, never in its unmounted directory stub.
+Missing markers and unavailable shares keep incoming messages local for the next run, regardless of device numbers.
+The code never creates the configured archive directory or marker.
 Overlapping storage paths, including aliases and nested directories, are rejected.
 
 Call `archiveExpired()` from the host's retention job.
@@ -142,10 +149,14 @@ Standalone users can supply `isBound(id)` in the options or call `trackBindings(
 Replies received while the archive is unavailable stay local and merge when the mounted archive returns.
 
 Archive writes use a verified temporary file and atomic rename before deleting the unchanged local source.
-Older valid archives merge into the replacement; damaged archive files are preserved with a `.recovery-` suffix for operator inspection.
+Older valid archives merge into the replacement; damaged or non-regular archive records stay untouched and appear in `retained`.
+They do not block local reads or incoming replies.
+Legacy recovery files also appear in `retained`, including when no local record exists; retention cannot declare a clean archive until an operator resolves them.
 One corrupt local record is reported without blocking the remaining records.
-A SQLite lock under `data/` serializes reads, reactivation, and retention across processes and releases on process exit.
-Processes using the same archive namespace must share the checkout and its lock database.
+SQLite locks under `data/` serialize each thread's writes and retention across processes and release on process exit.
+Reads use read-only transactions, and a sweep releases each record's lock before processing another.
+A slow archive copy does not lock out other threads.
+Processes using the same archive namespace must share the checkout and its lock directory.
 
 The archive tests use `hdiutil` on macOS to mount and remove a disposable disk image.
 They also exercise an ordinary local directory as an unmounted stub and a full archive filesystem.

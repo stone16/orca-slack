@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -25,5 +25,10 @@ afterAll(() => {
 export function makeArchive(path: string): void {
   const directory = join(root, 'mounted', randomUUID());
   mkdirSync(directory);
+  writeFileSync(join(directory, '.orca-slack-archive'), '');
   symlinkSync(directory, path);
+}
+
+export function archiveFiles(directory: string): string[] {
+  return readdirSync(directory).filter(name => name !== '.orca-slack-archive');
 }
