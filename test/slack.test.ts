@@ -290,3 +290,19 @@ test('stop cancellation preserves a later prompt for the replacement lead', asyn
       .toEqual(['A fresh request after stop']);
   } finally { store.close(); }
 });
+
+test.each([
+  { ts: '99', threadTs: undefined },
+  { ts: '100', threadTs: 'untracked-root' },
+])('unmentioned outsider chatter outside a Bridge thread is ignored at $ts', async location => {
+  const store = new Store(':memory:');
+  seed(store);
+  const ports = boundary();
+  try {
+    await new Bridge(ports.orca, ports.slack, store, ['U1', 'U2'], 'BOT').event({ ...event, ...location,
+      user: 'OUTSIDER', text: 'An ordinary conversation between teammates' });
+    expect(ports.refused).toEqual([]);
+    expect(ports.commands).toEqual([]);
+    expect(store.inbound()).toEqual([]);
+  } finally { store.close(); }
+});

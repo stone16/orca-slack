@@ -15,14 +15,14 @@ export class Bridge {
 
   async event(event: SlackEvent): Promise<void> {
     if (event.botMessage || event.user === this.botId) return;
-    if (!this.allowedUsers.includes(event.user)) {
-      await this.slack.refuse(event.channel, event.user);
-      return;
-    }
     const threadTs = event.threadTs ?? event.ts;
     const existing = this.store.findThread(event.channel, threadTs);
     const mentioned = event.text.includes(`<@${this.botId}>`);
     if (!existing && !mentioned) return;
+    if (!this.allowedUsers.includes(event.user)) {
+      await this.slack.refuse(event.channel, event.user);
+      return;
+    }
     const thread = existing ?? { id: JSON.stringify([event.channel, threadTs]), channel: event.channel,
       threadTs, owner: event.user };
     const kind = this.text(event.text) === '!stop' ? 'stop'
