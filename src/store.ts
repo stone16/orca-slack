@@ -111,6 +111,9 @@ export class Store {
     return this.db.prepare('SELECT * FROM lead_sessions WHERE threadId=? ORDER BY rowid').all(threadId)
       .map(row => ({ ...row, active: row.active === 1 })) as unknown as LeadSession[];
   }
+  endLead(id: string): void {
+    this.db.prepare('UPDATE lead_sessions SET active=0 WHERE id=?').run(id);
+  }
   saveDecision(decision: Omit<Decision, 'answer' | 'answeredBy'>): void {
     this.db.prepare('INSERT INTO decisions VALUES (?, ?, ?, ?, NULL, NULL)')
       .run(decision.id, decision.threadId, JSON.stringify(decision.options), decision.slackTs);
