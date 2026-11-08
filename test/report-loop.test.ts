@@ -177,3 +177,29 @@ test('the oldest message id without its inbox sequence does not establish full-p
     expect((await new ReportLoop(scripted.client, store, 'run', async () => {}).reconcile()).state).toBe('gap');
   } finally { store.close(); }
 });
+
+test('an aged-out saved report without a sequence is delivered without blocking the pending inbox page', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-aged-report-'));
+  roots.push(root);
+  const file = join(root, 'ledger.sqlite');
+  const scripted = new ScriptedOrca();
+  scripted.add('aged-report');
+  let store = new Store(file);
+  await expect(new ReportLoop(scripted.client, store, 'run', async () => {}, step => {
+    if (step === 'after-consume-persist') throw new Error('Bridge crashed');
+  }).poll()).rejects.toThrow('Bridge crashed');
+  store.close();
+  for (let i = 0; i < 1000; i++) scripted.add(`new-${i}`);
+  store = new Store(file);
+  const sent: string[] = [];
+  try {
+    const loop = new ReportLoop(scripted.client, store, 'run', async report => { sent.push(report.id); });
+    await loop.recover();
+    await loop.recover();
+    expect(sent).toHaveLength(1001);
+    expect(new Set(sent).size).toBe(1001);
+    expect(sent).toContain('aged-report');
+    expect(store.reports('run').find(row => row.id === 'aged-report')).toMatchObject({ state: 'sent' });
+    expect(store.coverage('run')?.state).toBe('gap');
+  } finally { store.close(); }
+});
