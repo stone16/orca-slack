@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import type { Inbox, Message } from './orca.js';
 
 export interface Thread {
   id: string; channel: string; threadTs: string; owner: string; linearTicket?: string;
@@ -15,6 +16,8 @@ export interface Decision {
   id: string; threadId: string; options: string[]; slackTs: string;
   answer?: string; answeredBy?: string;
 }
+export interface Report extends Message { runId: string; state: 'pending' | 'sent' }
+export interface Coverage { state: 'complete' | 'gap'; count: number }
 
 export class Store {
   private db: DatabaseSync;
@@ -38,7 +41,13 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS active_lead ON lead_sessions(threadId) WHERE active=1;
       CREATE TABLE IF NOT EXISTS decisions (
         id TEXT PRIMARY KEY, threadId TEXT NOT NULL REFERENCES threads(id),
-        options TEXT NOT NULL, slackTs TEXT NOT NULL, answer TEXT, answeredBy TEXT);`);
+        options TEXT NOT NULL, slackTs TEXT NOT NULL, answer TEXT, answeredBy TEXT);
+      CREATE TABLE IF NOT EXISTS reports (
+        runId TEXT NOT NULL, id TEXT NOT NULL, sequence INTEGER, message TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'sent')),
+        PRIMARY KEY(runId, id), UNIQUE(runId, sequence));
+      CREATE TABLE IF NOT EXISTS coverage (
+        runId TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('complete', 'gap')), count INTEGER NOT NULL);`);
   }
   private transaction<T>(work: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -105,6 +114,47 @@ export class Store {
     if (!decision?.options.includes(answer)) return false;
     return this.db.prepare('UPDATE decisions SET answer=?, answeredBy=? WHERE id=? AND answer IS NULL')
       .run(answer, user, id).changes === 1;
+  }
+  persistReports(runId: string, messages: Message[]): void {
+    this.transaction(() => this.writeReports(runId, messages));
+  }
+  private writeReports(runId: string, messages: Message[]): void {
+    for (const message of messages) {
+        const existing = this.db.prepare('SELECT sequence FROM reports WHERE runId=? AND id=?').get(runId, message.id);
+        if (existing?.sequence != null && message.sequence != null && existing.sequence !== message.sequence) {
+          throw new Error(`Report sequence changed: ${message.id}`);
+        }
+        this.db.prepare(`INSERT INTO reports(runId, id, sequence, message) VALUES (?, ?, ?, ?)
+          ON CONFLICT(runId, id) DO UPDATE SET sequence=COALESCE(reports.sequence, excluded.sequence)`)
+          .run(runId, message.id, message.sequence ?? null, JSON.stringify(message));
+    }
+  }
+  reports(runId: string): Report[] {
+    return this.db.prepare('SELECT * FROM reports WHERE runId=? ORDER BY sequence, rowid').all(runId)
+      .map(row => ({ ...JSON.parse(row.message as string), runId, state: row.state,
+        ...(row.sequence === null ? {} : { sequence: row.sequence }) })) as Report[];
+  }
+  hasReport(runId: string, id: string, sequence: number): boolean {
+    return !!this.db.prepare('SELECT 1 FROM reports WHERE runId=? AND id=? AND sequence=?').get(runId, id, sequence);
+  }
+  markReportSent(runId: string, id: string): void {
+    this.db.prepare("UPDATE reports SET state='sent' WHERE runId=? AND id=?").run(runId, id);
+  }
+  reconcileInbox(runId: string, inbox: Inbox): Coverage {
+    return this.transaction(() => {
+      const oldest = inbox.messages.reduce<Inbox['messages'][number] | undefined>(
+        (a, b) => !a || b.sequence < a.sequence ? b : a, undefined);
+      const complete = inbox.count < 1000 || (oldest && this.hasReport(runId, oldest.id, oldest.sequence));
+      const coverage: Coverage = { state: complete && this.coverage(runId)?.state !== 'gap' ? 'complete' : 'gap',
+        count: inbox.count };
+      this.writeReports(runId, inbox.messages);
+      this.db.prepare(`INSERT INTO coverage VALUES (?, ?, ?) ON CONFLICT(runId)
+        DO UPDATE SET state=excluded.state, count=excluded.count`).run(runId, coverage.state, coverage.count);
+      return coverage;
+    });
+  }
+  coverage(runId: string): Coverage | undefined {
+    return this.db.prepare('SELECT state, count FROM coverage WHERE runId=?').get(runId) as Coverage | undefined;
   }
   close(): void { this.db.close(); }
 }
