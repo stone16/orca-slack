@@ -25,6 +25,9 @@ export interface SlackEvent {
 export interface Inbound extends SlackEvent {
   key: string; threadId: string; kind: 'prompt' | 'stop' | 'archive'; state: 'pending' | 'forwarded' | 'archived';
 }
+export interface ObservedPullRequest extends PullRequest {
+  number: number; state: 'OPEN' | 'CLOSED' | 'MERGED'; headRefOid: string;
+}
 
 export interface RoutingSample {
   threadId: string; text: string; repository: string | null;
@@ -73,7 +76,10 @@ export class Store {
         threadId TEXT NOT NULL REFERENCES threads(id), message TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('prompt', 'stop', 'archive')),
         state TEXT NOT NULL CHECK(state IN ('pending', 'forwarded', 'archived')),
-        UNIQUE(installationId, eventId));`);
+        UNIQUE(installationId, eventId));
+      CREATE TABLE IF NOT EXISTS pr_observations (
+        id TEXT PRIMARY KEY REFERENCES pull_requests(id), number INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('OPEN', 'CLOSED', 'MERGED')), headRefOid TEXT NOT NULL);`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS routing_samples (
         threadId TEXT PRIMARY KEY REFERENCES threads(id), text TEXT NOT NULL, repository TEXT,
@@ -303,6 +309,34 @@ export class Store {
         .run(session.threadId, `answer:${decisionId}`, 'answered', answer, session.id);
       if (messageKey) this.markInboundForwarded(messageKey);
       return true;
+    });
+  }
+  trackedWorktrees(threadId?: string): Worktree[] {
+    return (threadId === undefined ? this.db.prepare('SELECT * FROM worktrees ORDER BY rowid').all()
+      : this.worktrees(threadId)) as unknown as Worktree[];
+  }
+  observedPullRequests(threadId: string): ObservedPullRequest[] {
+    return this.db.prepare(`SELECT p.*, o.number, o.state, o.headRefOid FROM pull_requests p
+      JOIN pr_observations o ON o.id=p.id JOIN worktrees w ON w.id=p.worktreeId
+      WHERE w.threadId=? ORDER BY p.rowid`).all(threadId) as unknown as ObservedPullRequest[];
+  }
+  observePullRequests(prs: ObservedPullRequest[]): ObservedPullRequest[] {
+    return this.transaction(() => {
+      const changes: ObservedPullRequest[] = [];
+      for (const pr of prs) {
+        const existing = this.db.prepare(`SELECT p.*, o.number, o.state, o.headRefOid FROM pull_requests p
+          LEFT JOIN pr_observations o ON o.id=p.id WHERE p.id=?`).get(pr.id);
+        if (existing && existing.worktreeId !== pr.worktreeId) throw new Error('Pull request belongs to another worktree');
+        if (existing && existing.url === pr.url && existing.number === pr.number &&
+            existing.state === pr.state && existing.headRefOid === pr.headRefOid) continue;
+        this.db.prepare(`INSERT INTO pull_requests VALUES (?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET url=excluded.url`).run(pr.id, pr.worktreeId, pr.url);
+        this.db.prepare(`INSERT INTO pr_observations VALUES (?, ?, ?, ?) ON CONFLICT(id)
+          DO UPDATE SET number=excluded.number, state=excluded.state, headRefOid=excluded.headRefOid`)
+          .run(pr.id, pr.number, pr.state, pr.headRefOid);
+        changes.push(pr);
+      }
+      return changes;
     });
   }
   close(): void { this.db.close(); }
