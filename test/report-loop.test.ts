@@ -152,3 +152,18 @@ test('a sequence conflict rolls back a recovered batch instead of discarding a r
     expect(store.reports('run').map(row => row.id)).toEqual(['original']);
   } finally { store.close(); }
 });
+
+test('overlapping polls on the sole report consumer do not send a report twice', async () => {
+  const store = new Store(':memory:');
+  const scripted = new ScriptedOrca();
+  scripted.add('report');
+  const sent: string[] = [];
+  try {
+    const loop = new ReportLoop(scripted.client, store, 'run', async report => {
+      sent.push(report.id);
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await Promise.all([loop.poll(), loop.poll(), loop.recover()]);
+    expect(sent).toEqual(['report']);
+  } finally { store.close(); }
+});
