@@ -366,20 +366,22 @@ The spec asked it to run a 60-second sleep and send no worker_done yet. `lsof` i
       "exactWorker": true,
       "agentWait": null
     },
-    "projectionStage": {
-      "worker": "ready",
-      "dispatch": "dispatched",
-      "detail": "input_accepted",
-      "activity": "working"
-    },
-    "projectionLiveness": {
-      "verdict": "live",
-      "observedAt": 1794138477377,
-      "source": "agent_status"
-    },
-    "attention": {
-      "categories": [],
-      "requiresAction": false
+    "projection": {
+      "stage": {
+        "worker": "ready",
+        "dispatch": "dispatched",
+        "detail": "input_accepted",
+        "activity": "working"
+      },
+      "liveness": {
+        "verdict": "live",
+        "observedAt": 1794138477377,
+        "source": "agent_status"
+      },
+      "attention": {
+        "categories": [],
+        "requiresAction": false
+      }
     }
   }
 }
@@ -396,21 +398,23 @@ The spec asked it to run a 60-second sleep and send no worker_done yet. `lsof` i
       "exactWorker": true,
       "agentWait": null
     },
-    "projectionStage": {
-      "worker": "ready",
-      "dispatch": "dispatched",
-      "detail": "input_accepted",
-      "activity": "unknown"
-    },
-    "projectionLiveness": {
-      "verdict": "unverifiable",
-      "reason": "missing_status"
-    },
-    "attention": {
-      "categories": [
-        "unverifiable"
-      ],
-      "requiresAction": true
+    "projection": {
+      "stage": {
+        "worker": "ready",
+        "dispatch": "dispatched",
+        "detail": "input_accepted",
+        "activity": "unknown"
+      },
+      "liveness": {
+        "verdict": "unverifiable",
+        "reason": "missing_status"
+      },
+      "attention": {
+        "categories": [
+          "unverifiable"
+        ],
+        "requiresAction": true
+      }
     }
   }
 }
@@ -482,24 +486,26 @@ For the unreported turn, the screen showed the final marker and an idle agent pr
     "exactWorker": true,
     "agentWait": null
   },
-  "projectionStage": {
-    "worker": "ready",
-    "dispatch": "dispatched",
-    "detail": "input_accepted",
-    "activity": "done"
-  },
-  "projectionLiveness": {
-    "verdict": "live",
-    "observedAt": 1794139696088,
-    "source": "agent_status"
-  },
-  "attention": {
-    "categories": [],
-    "requiresAction": false
+  "projection": {
+    "stage": {
+      "worker": "ready",
+      "dispatch": "dispatched",
+      "detail": "input_accepted",
+      "activity": "done"
+    },
+    "liveness": {
+      "verdict": "live",
+      "observedAt": 1794139696088,
+      "source": "agent_status"
+    },
+    "attention": {
+      "categories": [],
+      "requiresAction": false
+    }
   }
 }
 ```
-Its four `worker-read` cursors were unchanged, yet `projection.liveness` stayed `live`, activity was `done`, and `attention.requiresAction` remained false. Subsequent three reads **with** the stored worker cursor returned `transcript.messages:[]`, `returnedMessageCount:0`, unchanged cursor, and `contentComplete:true`; matching terminal cursor reads returned:
+Its four `worker-read` cursors were unchanged, yet `projection.liveness.verdict` stayed `live`, activity was `done`, and `projection.attention.requiresAction` remained false. Subsequent three reads **with** the stored worker cursor returned `transcript.messages:[]`, `returnedMessageCount:0`, unchanged cursor, and `contentComplete:true`; matching terminal cursor reads returned:
 
 ```json
 {
@@ -764,10 +770,10 @@ References: [docs/brief.md:299](../brief.md#4-架构), [docs/brief.md:311](../br
 
 ## 8. Public-safety and validation probe
 
-The report was scanned for home/volume paths, common credential forms, and a private denylist generated from pre-existing repository/workspace names. Existing machine paths were normalized before writing; raw private snapshots were never added to git. The public probe's character classes avoid embedding forbidden path literals in this report:
+The report was scanned for home/volume paths, common credential forms, and a private denylist generated from pre-existing repository/workspace names. Existing machine paths were normalized before writing; raw private snapshots were never added to git. The public probe below represents the path pattern with a variable supplied by the private scanner so the pattern itself is not embedded in this report:
 
 ```sh
-rg -n -i '/[U]sers/|/[V]olumes/|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' docs/spikes/2026-11-08-orca-coordination.md
+rg -n -i "${PRIVATE_PATH_PATTERN:?Supply the private scanner path pattern}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----" docs/spikes/2026-11-08-orca-coordination.md
 # stdout: <empty>; exit 1 (no matches)
 # Private pre-existing-name denylist: no matches.
 git diff --check

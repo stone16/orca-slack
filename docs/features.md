@@ -58,7 +58,7 @@ wake 分类器（LLM 判断陌生人消息能不能叫醒 agent）、transcript 
 ## 术语
 
 - **dispatch**：Orca 的一次任务尝试（`ctx_…`）。线程状态表的主键之一。
-- **角色**：`stometa-mode/SKILL.md` 的路由表一行（agent, model, effort, skill）。桥只读它，不自己定义人设。
+- **角色**：协调者路由表的一行（agent, model, effort, skill）。桥只读它，不自己定义人设。
 - **回报**：worker 通过 `orca orchestration send` 发出的 `worker_done / question / escalation / merge_ready / decision_gate / heartbeat`。
 
 ---
@@ -94,7 +94,7 @@ wake 分类器（LLM 判断陌生人消息能不能叫醒 agent）、transcript 
 |---|---|---|---|
 | 13 | 决策门卡 | coordinator `decision_gate` → 一个选项一个按钮 → `orca orchestration gate-resolve` → 叫醒 coordinator | dnhynk `gate/actions.ts`、`gate/render.ts` 抄；`gate/resolve.ts` 只参考（先落盘再 resolve 再叫醒的状态机） |
 | 14 | 状态卡 + 限频 | 每线程**一条**状态消息，heartbeat/status 更新靠 `chat.update` 改它，不刷屏；里程碑 ≤1 条/分钟 | dnhynk `run/publish.ts` 的内容指纹（没变不发）只参考；facumoyano 限频 |
-| 15 | 角色选择 | `@bot research: …` / `code:` / `review:` 前缀选路由表的行；表从 `stometa-mode` 仓库读，不在桥里复制 | — |
+| 15 | 角色选择 | `@bot research: …` / `code:` / `review:` 前缀选路由表的行；表从协调者的配置仓库读，不在桥里复制 | — |
 | 16 | 运行控制 | 硬 deadline（默认 90 min）到点 `worker-stop` 并回帖；重复任务检测（同一 issue URL 已在别的线程 → 指过去） | facumoyano 重复检测 |
 | 17 | 危险命令审批 | agent 的 hook（Claude PreToolUse / Codex approval）把 force-push、`rm -rf`、`git reset --hard` 等打到 Slack 按钮，只有 owner 能批 | pawel-kotowski 的 gate；需每家 agent 分别接 |
 | 18 | 身份 | PR 作者是 bot 账号，PR body 带线程链接 + 发起人；tracker 评论只在需要人动手时写，走现有 `orca-linear` / `orca-jira` skill | — |
@@ -106,7 +106,7 @@ wake 分类器（LLM 判断陌生人消息能不能叫醒 agent）、transcript 
 |---|---|---|
 | 20 | Lark 入口 | 同一核心，第二个 adapter（公司 Z 用）。入口层从第一天就隔成 `adapter` 接口，别把 Slack 类型漏进核心 |
 | 21 | 接管 | 线程里 `!takeover` → 回一行本地打开该 worktree 的 `orca` 命令 |
-| 22 | 评审链 | `worker_done` 后自动起不同模型的 evaluator——这属于 `stometa-mode` 的 coordinator 链，**不**在桥里做；桥只派第一跳 |
+| 22 | 评审链 | `worker_done` 后自动起不同模型的 evaluator——这属于协调者工作流的 coordinator 链，**不**在桥里做；桥只派第一跳 |
 
 ## 不做
 
@@ -123,7 +123,7 @@ wake 分类器（LLM 判断陌生人消息能不能叫醒 agent）、transcript 
 - 仓库：`~/dev/orca-slack`，独立 repo（不是 `orca_automations` 子目录——两者生命周期不同，桥要常驻，jobs 是 cron）。
 - 测试：核心纯函数（路由、消息→命令映射、回报→Block Kit）单测；Orca CLI 和 Slack 都 mock 成可注入的接口。
 
-## 待 Stometa 决定
+## 待所有者决定
 
 1. TS 还是 Python？（上面默认 TS）
 2. 第一个试点用哪个 Slack workspace / 频道，哪个 repo 做 P0 验收任务？（默认：一个测试频道 + 一个个人 repo）
@@ -143,7 +143,7 @@ P1 变化：1.6 LLM 判意图 + eval（先用 P0 收样本）· 1.7 owner DM 入
 
 先不定：1.4 ticket 当任务源（取决于 1.8）· 6.6 · 7.2 成本上限 · **1.8 外环需求代理**（新）。
 
-原则：两环（外环聊需求 → Linear ticket；内环 stometa-mode/poteto-mode）· 一个频道 + 模型按 mapping 选 repo · 多厂商按 stometa-mode 路由表 · SQLite 不换 Postgres · 不另建 queue · launchd 不换 Docker · PR 暂用本人 gh 身份。
+原则：两环（外环聊需求 → Linear ticket；内环由协调者和执行者工作流完成开发与验证）· 一个频道 + 模型按 mapping 选 repo · 多厂商按协调者路由表 · SQLite 不换 Postgres · 不另建 queue · launchd 不换 Docker · PR 暂用本人 gh 身份。
 
 ## 2026-11-08 对齐：worktree 生命周期与架构
 
