@@ -43,10 +43,12 @@ export class Cleanup {
   async check(worktreeId: string): Promise<CleanupCheck> {
     const tree = this.store.trackedWorktrees().find(tree => tree.id === worktreeId);
     if (!tree) return { allowed: false, reasons: ['Unknown worktree'] };
-    const known = this.store.pullRequests(tree.threadId);
+    const tracked = this.store.trackedWorktrees(tree.threadId);
+    const trackedIds = new Set(tracked.map(worktree => worktree.id));
+    const known = this.store.pullRequests(tree.threadId).filter(pr => trackedIds.has(pr.worktreeId));
     const prs: ObservedPullRequest[] = [];
     try {
-      for (const worktree of this.store.trackedWorktrees(tree.threadId)) {
+      for (const worktree of tracked) {
         prs.push(...(await queryPullRequests(worktree, this.run)).map(pr => ({ ...pr,
           id: known.find(saved => saved.url === pr.url && saved.worktreeId === pr.worktreeId)?.id ?? pr.id })));
       }
