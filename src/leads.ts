@@ -25,10 +25,14 @@ export class Leads {
     this.store.recordLeadEvent({ threadId: session.threadId, sessionId: session.id, kind, text, key });
   }
   private state(session: LeadSession): LeadEvent['kind'] | undefined {
-    return this.store.leadEvents(session.threadId).filter(event => event.sessionId === session.id).at(-1)?.kind;
+    const events = this.store.leadEvents(session.threadId).filter(event => event.sessionId === session.id);
+    return events.some(event => event.kind === 'interrupted') ? 'interrupted' : events.at(-1)?.kind;
   }
   forward(threadId: string): Promise<void> { return this.serial(threadId, () => this.forwardPending(threadId)); }
   private async forwardPending(threadId: string): Promise<void> {
+    for (const message of this.store.inbound(threadId)) {
+      if (message.kind === 'prompt' && message.state === 'pending' && !this.text(message.text)) this.store.archiveInbound(message.key);
+    }
     const pending = this.store.inbound(threadId).filter(message => message.kind === 'prompt' && message.state === 'pending');
     if (!pending.length) return;
     let sample = this.store.routingSamples(threadId)[0];
@@ -44,13 +48,12 @@ export class Leads {
       if (this.state(lead) === 'interrupted') return;
       for (const message of pending) {
         const question = this.store.pendingLeadDecisions(threadId)[0];
-        const text = message.text.split(`<@${this.config.botId}>`).join('').trim();
+        const text = this.text(message.text);
         if (question && message.user === this.store.thread(threadId)!.owner) {
-          if (!await this.reply(threadId, question.id, text, message.user)) return;
-        } else {
-          await this.orca.call('send', ['--to', `dispatch:${lead.dispatchId}`, '--run', lead.runId,
-            '--type', 'status', '--subject', 'Slack follow-up', '--body', text]);
+          if (await this.reply(threadId, question.id, text, message.user, message.key)) continue;
         }
+        await this.orca.call('send', ['--to', `dispatch:${lead.dispatchId}`, '--run', lead.runId,
+          '--type', 'status', '--subject', 'Slack follow-up', '--body', text]);
         this.store.markInboundForwarded(message.key);
       }
       return;
@@ -93,10 +96,7 @@ export class Leads {
       }
       const session = { id, threadId, worktreeId: tree.id, runId: receipt.runId,
         dispatchId: receipt.dispatchId, taskId: receipt.taskId, handle };
-      this.store.replaceLead(session);
-      this.store.finishLeadLaunch(threadId);
-      this.event({ ...session, active: true }, 'started', 'Lead session started', `started:${id}`);
-      for (const message of messages) if (message.state === 'pending') this.store.markInboundForwarded(message.key);
+      this.store.completeLeadLaunch(session, messages.filter(message => message.state === 'pending').map(message => message.key));
     } catch (error) {
       if (error instanceof OrcaError && error.receipt.dispatchId) this.store.saveLaunchDispatch(threadId, error.receipt.dispatchId);
       this.store.recordLeadEvent({ threadId, key: `launch-unknown:${id}`, kind: 'unknown',
@@ -105,28 +105,31 @@ export class Leads {
     }
   }
   answer(threadId: string, decisionId: string, answer: string, user: string): Promise<boolean> {
-    return this.serial(threadId, () => this.reply(threadId, decisionId, answer, user));
+    return this.serial(threadId, () => {
+      const decision = this.store.decision(decisionId);
+      if (decision?.options.length && !decision.options.includes(answer)) return Promise.resolve(false);
+      return this.reply(threadId, decisionId, answer, user);
+    });
   }
-  private async reply(threadId: string, decisionId: string, answer: string, user: string): Promise<boolean> {
+  private async reply(threadId: string, decisionId: string, answer: string, user: string, messageKey?: string): Promise<boolean> {
     const thread = this.store.thread(threadId);
     const decision = this.store.pendingLeadDecisions(threadId).find(decision => decision.id === decisionId);
     const question = this.store.leadEvents(threadId).find(event => event.key === decisionId && event.kind === 'waiting');
     const session = this.store.leadSessions(threadId).find(session => session.id === question?.sessionId && session.active);
     if (!thread || thread.owner !== user || !decision || !session ||
-        (decision.options.length > 0 && !decision.options.includes(answer)) || !answer.trim()) return false;
+        this.state(session) === 'interrupted' || !answer.trim()) return false;
     await this.orca.call('reply', ['--id', decisionId, '--body', answer, '--run', session.runId]);
-    this.store.answerLeadDecision(decisionId, answer, user);
-    this.event(session, 'answered', answer, `answer:${decisionId}`);
-    return true;
+    return this.store.completeLeadReply(session, decisionId, answer, user, messageKey);
   }
-  stop(threadId: string): Promise<void> {
+  stop(threadId: string, messageKey?: string): Promise<void> {
     return this.serial(threadId, async () => {
       const lead = this.store.leadSessions(threadId).find(session => session.active);
       const dispatchId = lead?.dispatchId ?? this.store.launchDispatch(threadId);
       if (!dispatchId && this.store.pendingLaunch(threadId)) throw new Error('Cannot verify stop while launch identity is unknown');
       if (dispatchId) await this.orca.call('worker-stop', ['--dispatch', dispatchId]);
+      const stopId = messageKey ?? lead?.id ?? this.store.pendingLaunch(threadId) ?? randomUUID();
       this.store.finishLeadLaunch(threadId);
-      this.store.recordLeadEvent({ threadId, key: `stop:${lead?.id ?? 'idle'}`, kind: 'stopped',
+      this.store.recordLeadEvent({ threadId, key: `stop:${stopId}`, kind: 'stopped',
         text: 'Stopped; worktrees retained.', ...(lead ? { sessionId: lead.id } : {}) }, lead?.id);
     });
   }
@@ -138,7 +141,7 @@ export class Leads {
       session.taskId === payload.taskId && session.runId === report.runId);
     if (!lead) return;
     await this.serial(lead.threadId, async () => {
-      if (!this.store.leadSessions(lead.threadId).some(session => session.id === lead.id && session.active)) return;
+      if (!this.store.leadSessions(lead.threadId).some(session => session.id === lead.id && session.active) || this.state(lead) === 'interrupted') return;
       const event = { threadId: lead.threadId, sessionId: lead.id, key: report.id, text: report.body ?? report.subject ?? '' };
       if (report.type === 'question') {
         let options: string[] = [];
@@ -190,16 +193,18 @@ export class Leads {
     const unknown = state?.projection?.liveness?.verdict !== 'live';
     const complete = typeof worker?.source === 'string' && typeof worker?.cursor === 'string' &&
       typeof terminal.source === 'string' && typeof terminal.nextCursor === 'string';
-    const frozen = previous && !sourceReset && complete && unknown && state?.projection?.attention?.requiresAction === true && state?.observation?.agentWait === null && !waiting &&
-      previous.source === worker.source && previous.cursor === worker.cursor &&
-      previous.terminalSource === terminal.source && previous.terminalCursor === terminal.nextCursor
-      ? previous.frozen + 1 : 0;
+    const eligible = state?.projection?.liveness?.verdict === 'unverifiable' &&
+      state?.projection?.attention?.requiresAction === true && state?.observation?.agentWait === null && !waiting;
+    const unchanged = previous && previous.frozen > 0 && !sourceReset && previous.source === worker?.source &&
+      previous.cursor === worker?.cursor && previous.terminalSource === terminal.source && previous.terminalCursor === terminal.nextCursor;
+    const frozen = eligible && complete ? unchanged ? previous.frozen + 1 : 1 : 0;
     if (complete) this.store.saveLeadObservation({ sessionId: lead.id, source: worker.source!, cursor: worker.cursor!,
       terminalSource: terminal.source!, terminalCursor: terminal.nextCursor!, frozen });
     else if (previous) this.store.saveLeadObservation({ ...previous, source: '', frozen: 0 });
-    const kind = frozen >= 2 ? 'interrupted' : waiting ? 'waiting' : unknown ? 'unknown' : 'running';
+    const kind = frozen > 2 ? 'interrupted' : waiting ? 'waiting' : unknown ? 'unknown' : 'running';
     if (this.state(lead) !== kind) this.event(lead, kind,
       kind === 'interrupted' ? 'Lead status remained unverifiable with no read progress past two polls.' : `Lead status: ${kind}`,
       `observation:${randomUUID()}`);
   }
+  private text(text: string): string { return text.split(`<@${this.config.botId}>`).join('').trim(); }
 }

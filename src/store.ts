@@ -285,5 +285,30 @@ export class Store {
     return this.db.prepare('UPDATE decisions SET answer=?, answeredBy=? WHERE id=? AND answer IS NULL')
       .run(answer, user, id).changes === 1;
   }
+  archiveInbound(key: string): void {
+    this.db.prepare("UPDATE inbound SET state='archived' WHERE key=? AND state='pending'").run(key);
+  }
+  completeLeadLaunch(session: Omit<LeadSession, 'active'>, messageKeys: readonly string[]): void {
+    this.transaction(() => {
+      this.db.prepare('INSERT INTO lead_sessions VALUES (?, ?, ?, ?, ?, ?, ?, 1)')
+        .run(session.id, session.threadId, session.worktreeId, session.runId,
+          session.taskId, session.dispatchId, session.handle);
+      this.finishLeadLaunch(session.threadId);
+      this.db.prepare('INSERT INTO lead_events VALUES (?, ?, ?, ?, ?)')
+        .run(session.threadId, `started:${session.id}`, 'started', 'Lead session started', session.id);
+      for (const key of messageKeys) this.markInboundForwarded(key);
+    });
+  }
+  completeLeadReply(session: LeadSession, decisionId: string, answer: string, user: string, messageKey?: string): boolean {
+    return this.transaction(() => {
+      const changed = this.db.prepare('UPDATE decisions SET answer=?, answeredBy=? WHERE id=? AND answer IS NULL')
+        .run(answer, user, decisionId).changes;
+      if (!changed) return false;
+      this.db.prepare('INSERT INTO lead_events VALUES (?, ?, ?, ?, ?)')
+        .run(session.threadId, `answer:${decisionId}`, 'answered', answer, session.id);
+      if (messageKey) this.markInboundForwarded(messageKey);
+      return true;
+    });
+  }
   close(): void { this.db.close(); }
 }
