@@ -49,7 +49,8 @@ A known inbox coverage gap stays recorded in `Store.coverage(runId)`.
 [PrPoller](src/pr-poller.ts#L5) queries `gh pr list` for every retained worktree with its repository, branch, and all PR states.
 `poll()` returns changed PRs and per-worktree failures; unchanged PRs produce no update.
 `start(onChange, onFailure)` schedules a poll every 60 seconds, skips overlapping timer ticks, and returns a function that stops future ticks.
-Keep the callbacks synchronous and call `poll()` directly for startup reconciliation.
+Callbacks may complete asynchronously; a poll remains busy until they settle.
+Call `poll()` directly for startup reconciliation.
 Callback exceptions do not stop later updates or polling ticks; change-callback errors are reported through `onFailure`.
 Malformed responses, truncated results, and command failures preserve the last known state and retry on the next poll.
 

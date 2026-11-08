@@ -125,7 +125,9 @@ test('poll accepts the full branch ref reported by Orca and queries gh with its 
   expect(calls[1].slice(4, 6)).toEqual(['--head', 'feat/api']);
 });
 
-test.each(['change', 'failure'])('a throwing %s callback is contained and the next poll still runs', async callback => {
+test.each([
+  ['change', false], ['failure', false], ['change', true], ['failure', true],
+])('a throwing %s callback is contained and the next poll still runs (async %s)', async (callback, asynchronous) => {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   const store = ledger();
   const unhandled: unknown[] = [];
@@ -139,12 +141,16 @@ test.each(['change', 'failure'])('a throwing %s callback is contained and the ne
   });
   let changes = 0;
   const failures: unknown[] = [];
+  const fail = (message: string) => {
+    if (asynchronous) return Promise.reject(new Error(message));
+    throw new Error(message);
+  };
   const stop = poller.start(() => {
     changes++;
-    if (callback === 'change' && changes === 1) throw new Error('change callback failed');
+    if (callback === 'change' && changes === 1) return fail('change callback failed');
   }, failure => {
     failures.push(failure);
-    if (callback === 'failure') throw new Error('failure callback failed');
+    if (callback === 'failure') return fail('failure callback failed');
   });
   try {
     await vi.advanceTimersByTimeAsync(120_000);

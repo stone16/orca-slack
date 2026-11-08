@@ -4,20 +4,21 @@ import { Store, type ObservedPullRequest, type Worktree } from './store.js';
 export interface PollResult { changes: ObservedPullRequest[]; failures: { worktreeId: string; reason: string }[] }
 export class PrPoller {
   constructor(private store: Store, private run: RunCommand = runCommand) {}
-  start(onChange: (change: ObservedPullRequest) => void, onFailure: (failure: PollResult['failures'][number]) => void): () => void {
+  start(onChange: (change: ObservedPullRequest) => void | Promise<void>,
+    onFailure: (failure: PollResult['failures'][number]) => void | Promise<void>): () => void {
     let busy = false;
-    const reportFailure = (failure: PollResult['failures'][number]) => {
-      try { onFailure(failure); } catch {}
+    const reportFailure = async (failure: PollResult['failures'][number]) => {
+      try { await onFailure(failure); } catch {}
     };
     const timer = setInterval(() => {
       if (busy) return;
       busy = true;
-      void this.poll().then(result => {
+      void this.poll().then(async result => {
         for (const change of result.changes) {
-          try { onChange(change); }
-          catch { reportFailure({ worktreeId: change.worktreeId, reason: 'PR change callback failed' }); }
+          try { await onChange(change); }
+          catch { await reportFailure({ worktreeId: change.worktreeId, reason: 'PR change callback failed' }); }
         }
-        result.failures.forEach(reportFailure);
+        for (const failure of result.failures) await reportFailure(failure);
       }).finally(() => { busy = false; });
     }, 60_000);
     return () => clearInterval(timer);
