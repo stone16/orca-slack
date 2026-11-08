@@ -500,3 +500,121 @@ test('cleanup feedback survives cleaned state and clears for a later worktree', 
   expect(JSON.parse(store.slackCard('thread', 'status')!.view).acted).toBeUndefined();
   expect(calls.filter(call => call.method === 'update')).toHaveLength(3);
 });
+
+test.each(['switch-repository', 'cleanup'] as const)(
+  'a stale worktree set refreshes %s without running the owner action', async actionId => {
+    const { adapter, changeView, store, ownerActions, calls } = setup();
+    const view: StatusView = actionId === 'cleanup' ? { ...initial, state: 'awaiting-verification',
+      worktrees: [{ ...initial.worktrees[0], agentActive: false,
+        pullRequest: { number: 1, url: 'https://github.com/example/web/pull/1', state: 'merged' } }] } : initial;
+    await adapter.status(view);
+    const current: StatusView = { ...view, worktrees: [...view.worktrees, { ...view.worktrees[0], id: 'child' }] };
+    changeView(current);
+    const clicked = { actionId, value: JSON.stringify({ threadId: 'thread' }), channel: 'C1',
+      user: 'U1', messageTs: '10.0', triggerId: 'fixture-trigger' };
+    await adapter.action(clicked);
+    expect(ownerActions).toEqual([]);
+    expect(JSON.parse(store.slackCard('thread', 'status')!.view)).toMatchObject(current);
+    expect(calls.filter(call => call.method === 'update')).toHaveLength(1);
+    await adapter.action(clicked);
+    await adapter.action(clicked);
+    expect(ownerActions).toEqual([actionId]);
+    expect(calls.filter(call => call.method === 'update')).toHaveLength(2);
+  });
+
+test.each([false, true])('cleanup attribution survives a direct cleaned transition with update failure=%s', async failUpdate => {
+  const { client, store, options, changeView, ownerActions, calls } = setup();
+  const cleanup: StatusView = { ...initial, state: 'awaiting-verification', worktrees: [{ ...initial.worktrees[0],
+    agentActive: false, pullRequest: { number: 1, url: 'https://github.com/example/web/pull/1', state: 'merged' } }] };
+  changeView(cleanup);
+  const adapter = new SlackAdapter(client, store, { ...options, ownerAction: async action => {
+    await options.ownerAction(action);
+    changeView({ ...cleanup, state: 'cleaned', worktrees: [] });
+  } });
+  await adapter.status(cleanup);
+  const before = store.slackCard('thread', 'status');
+  const update = client.chat.update;
+  let attempts = 0;
+  let fail = failUpdate;
+  client.chat.update = async args => {
+    attempts++;
+    if (fail) throw new Error('Slack unavailable');
+    return update(args);
+  };
+  const clicked = { actionId: 'cleanup', value: JSON.stringify({ threadId: 'thread' }), channel: 'C1',
+    user: 'U1', messageTs: '10.0', triggerId: 'fixture-trigger' };
+  if (failUpdate) {
+    await expect(adapter.action(clicked)).rejects.toThrow('Slack unavailable');
+    expect(store.slackCard('thread', 'status')).toEqual(before);
+    fail = false;
+  }
+  await adapter.action(clicked);
+  await adapter.action(clicked);
+  expect(JSON.parse(store.slackCard('thread', 'status')!.view)).toMatchObject({ state: 'cleaned', worktrees: [],
+    acted: { actionId: 'cleanup', user: 'U1' } });
+  expect(ownerActions).toEqual(['cleanup']);
+  expect(attempts).toBe(failUpdate ? 2 : 1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(1);
+});
+
+test('an asynchronous status refresh cannot overwrite a newer card publication', async () => {
+  const { client, store, options, calls } = setup();
+  const entered = Promise.withResolvers<void>();
+  const pending = Promise.withResolvers<StatusView>();
+  const adapter = new SlackAdapter(client, store, { ...options, statusView: async () => {
+    entered.resolve();
+    return pending.promise;
+  } });
+  await adapter.status(initial);
+  store.saveInbound(store.thread('thread')!, { installationId: 'A1:T1', eventId: 'Ev-refresh', channel: 'C1', ts: '5',
+    threadTs: '1700000000.000001', user: 'U1', text: 'Continue' }, 'prompt');
+  const refreshing = adapter.replay('thread');
+  await entered.promise;
+  const newer: StatusView = { ...initial, state: 'pr-open', next: 'Newer status' };
+  const publishing = adapter.status(newer);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  pending.resolve({ ...initial, state: 'waiting', next: 'Older snapshot' });
+  await Promise.all([refreshing, publishing]);
+  expect(JSON.parse(store.slackCard('thread', 'status')!.view)).toMatchObject(newer);
+  const updates = calls.filter(call => call.method === 'update');
+  expect(updates).toHaveLength(2);
+  expect(updates[0].args.text).toContain('Older snapshot');
+  expect(updates[1].args.text).toContain('Newer status');
+});
+
+test.each(['decision', 'result'] as const)('%s retries preserve a newer view published while its card is locked', async kind => {
+  const { adapter, client, store, calls, commands, ownerActions } = setup();
+  const decision = { threadId: 'thread', id: 'question', owner: 'U1', question: 'Older question', options: ['Continue'] };
+  const result = { threadId: 'thread', id: 'failure', owner: 'U1', outcome: 'failed' as const, text: 'Older result' };
+  if (kind === 'decision') await adapter.decision(decision);
+  else await adapter.result(result);
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const update = client.chat.update;
+  let attempts = 0;
+  client.chat.update = async args => {
+    attempts++;
+    if (attempts === 1) { entered.resolve(); await release.promise; }
+    return update(args);
+  };
+  const publishing = kind === 'decision' ? adapter.decision({ ...decision, question: 'Newer question' })
+    : adapter.result({ ...result, text: 'Newer result' });
+  await entered.promise;
+  const clicked = { actionId: kind === 'decision' ? 'decision_0' : 'retry',
+    value: JSON.stringify({ threadId: 'thread', decisionId: 'question', option: 'Continue', resultId: 'failure' }),
+    channel: 'C1', user: 'U1', messageTs: '10.0', triggerId: 'fixture-trigger' };
+  const answering = adapter.action(clicked);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(kind === 'decision' ? commands.length : ownerActions.length).toBe(1);
+  release.resolve();
+  await Promise.all([publishing, answering]);
+  await adapter.action(clicked);
+  const saved = JSON.parse(store.slackCard('thread', kind === 'decision' ? 'decision:question' : 'result:failure')!.view);
+  expect(saved).toMatchObject(kind === 'decision' ? { question: 'Newer question', answer: 'Continue' }
+    : { text: 'Newer result', retriedBy: 'U1' });
+  const updates = calls.filter(call => call.method === 'update');
+  expect(updates).toHaveLength(2);
+  expect(updates[1].args.text).toContain(kind === 'decision' ? 'Newer question' : 'Newer result');
+  expect(attempts).toBe(2);
+  expect(kind === 'decision' ? commands.length : ownerActions.length).toBe(1);
+});

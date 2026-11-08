@@ -51,13 +51,18 @@ export class SlackAdapter {
       blocks: [{ type: 'section', text: { type: 'plain_text', text: tail } }],
     } });
   }
-  private publish<T extends object>(threadId: string, key: string, view: (saved?: SlackCard) => T,
-    render: (view: T) => SlackPost): Promise<string> {
+  private publish<T extends object>(threadId: string, key: string, view: (saved?: SlackCard) => T | Promise<T>,
+    render: (view: T) => SlackPost): Promise<string>;
+  private publish<T extends object>(threadId: string, key: string,
+    view: (saved?: SlackCard) => T | undefined | Promise<T | undefined>, render: (view: T) => SlackPost): Promise<string | undefined>;
+  private publish<T extends object>(threadId: string, key: string,
+    view: (saved?: SlackCard) => T | undefined | Promise<T | undefined>, render: (view: T) => SlackPost): Promise<string | undefined> {
     return this.serial(`card:${threadId}:${key}`, async () => {
       const thread = this.store.thread(threadId);
       if (!thread) throw new Error('Unknown Slack thread');
       const saved = this.store.slackCard(threadId, key);
-      const current = view(saved);
+      const current = await view(saved);
+      if (!current) return;
       const encoded = JSON.stringify(current);
       if (saved?.view === encoded) return saved.ts;
       const message = render(current);
@@ -74,20 +79,23 @@ export class SlackAdapter {
     });
   }
   status(view: StatusView): Promise<string> {
-    return this.publish(view.threadId, 'status', saved => {
-      const previous: StatusView | undefined = saved && JSON.parse(saved.view);
-      const sameWork = previous && workKey(previous) === workKey(view);
-      const switchedBy = this.store.slackAction(view.threadId, operationKey('status', 'switch-repository', workKey(view)));
-      const cleanedBy = this.store.slackAction(view.threadId, operationKey('status', 'cleanup', workKey(view)));
-      let acted = view.acted;
-      if (switchedBy) acted = { actionId: 'switch-repository', user: switchedBy };
-      else if (sameWork && previous?.acted?.actionId === 'switch-repository') acted = previous.acted;
-      if (['awaiting-verification', 'cleaned'].includes(view.state)) {
-        if (cleanedBy) acted = { actionId: 'cleanup', user: cleanedBy };
-        else if (previous?.acted?.actionId === 'cleanup' && (sameWork || view.state === 'cleaned')) acted = previous.acted;
-      } else if (acted?.actionId === 'cleanup') acted = undefined;
-      return { ...view, acted };
-    }, renderStatus);
+    return this.publish(view.threadId, 'status', saved => this.statusView(view, saved), renderStatus);
+  }
+  private statusView(view: StatusView, saved?: SlackCard): StatusView {
+    const previous: StatusView | undefined = saved && JSON.parse(saved.view);
+    const sameWork = previous && workKey(previous) === workKey(view);
+    const switchedBy = this.store.slackAction(view.threadId, operationKey('status', 'switch-repository', workKey(view)));
+    const cleanedBy = this.store.slackAction(view.threadId, operationKey('status', 'cleanup', workKey(view))) ??
+      (previous && view.state === 'cleaned'
+        ? this.store.slackAction(view.threadId, operationKey('status', 'cleanup', workKey(previous))) : undefined);
+    let acted = view.acted;
+    if (switchedBy) acted = { actionId: 'switch-repository', user: switchedBy };
+    else if (sameWork && previous?.acted?.actionId === 'switch-repository') acted = previous.acted;
+    if (['awaiting-verification', 'cleaned'].includes(view.state)) {
+      if (cleanedBy) acted = { actionId: 'cleanup', user: cleanedBy };
+      else if (previous?.acted?.actionId === 'cleanup' && (sameWork || view.state === 'cleaned')) acted = previous.acted;
+    } else if (acted?.actionId === 'cleanup') acted = undefined;
+    return { ...view, acted };
   }
   decision(view: DecisionView): Promise<string> {
     return this.serial(`decision:${view.id}`, async () => {
@@ -95,24 +103,38 @@ export class SlackAdapter {
       if (existing && (existing.threadId !== view.threadId || JSON.stringify(existing.options) !== JSON.stringify(view.options))) {
         throw new Error('Decision identity changed');
       }
-      const owner = this.store.thread(view.threadId)?.owner;
-      if (!owner) throw new Error('Unknown Slack thread');
-      const current = { ...view, owner, answer: existing?.answer, answeredBy: existing?.answeredBy };
-      const ts = await this.publish(view.threadId, `decision:${view.id}`, () => current, renderDecision);
+      const ts = await this.publish(view.threadId, `decision:${view.id}`, () => this.decisionView(view), renderDecision);
       if (!existing) this.store.saveDecision({ id: view.id, threadId: view.threadId, options: view.options, slackTs: ts });
       return ts;
     });
   }
-  result(view: ResultView): Promise<string> {
+  private decisionView(view: DecisionView): DecisionView {
     const owner = this.store.thread(view.threadId)?.owner;
-    if (!owner) return Promise.reject(new Error('Unknown Slack thread'));
-    return this.publish(view.threadId, `result:${view.id}`, saved => ({ ...view, owner,
+    if (!owner) throw new Error('Unknown Slack thread');
+    const current = this.store.decision(view.id);
+    return { ...view, owner, answer: current?.answer, answeredBy: current?.answeredBy };
+  }
+  private refreshDecision(threadId: string, id: string): Promise<string | undefined> {
+    return this.publish(threadId, `decision:${id}`, saved => saved && this.decisionView(JSON.parse(saved.view)), renderDecision);
+  }
+  result(view: ResultView): Promise<string> {
+    return this.publish(view.threadId, `result:${view.id}`, saved => this.resultView(view, saved), renderResult);
+  }
+  private resultView(view: ResultView, saved?: SlackCard): ResultView {
+    const owner = this.store.thread(view.threadId)?.owner;
+    if (!owner) throw new Error('Unknown Slack thread');
+    return { ...view, owner,
       retriedBy: this.store.slackAction(view.threadId, operationKey(`result:${view.id}`, 'retry')) ??
-        (saved ? (JSON.parse(saved.view) as ResultView).retriedBy : undefined) ?? view.retriedBy }), renderResult);
+        (saved ? (JSON.parse(saved.view) as ResultView).retriedBy : undefined) ?? view.retriedBy };
+  }
+  private refreshResult(threadId: string, key: string): Promise<string | undefined> {
+    return this.publish(threadId, key, saved => saved && this.resultView(JSON.parse(saved.view), saved), renderResult);
   }
   private async refresh(threadId: string): Promise<void> {
-    const view = await this.options.statusView(threadId);
-    if (view) await this.status(view);
+    await this.publish(threadId, 'status', async saved => {
+      const view = await this.options.statusView(threadId);
+      return view && this.statusView(view, saved);
+    }, renderStatus);
   }
   private async react(event: SlackEvent, name: 'eyes' | 'white_check_mark'): Promise<void> {
     try { await this.slack.reactions.add({ channel: event.channel, timestamp: event.ts, name }); }
@@ -178,10 +200,14 @@ export class SlackAdapter {
       } else if (click.actionId === 'stop' || click.actionId === 'cleanup' || click.actionId === 'switch-repository') {
         key = 'status';
         const displayed = this.store.slackCard(threadId, key);
-        if (!displayed || !statusActions(JSON.parse(displayed.view)).includes(click.actionId)) return;
+        if (!displayed || displayed.ts !== click.messageTs || !statusActions(JSON.parse(displayed.view)).includes(click.actionId)) return;
         const receiptKey = operationKey(key, click.actionId, workKey(JSON.parse(displayed.view)));
         const view = await this.options.statusView(threadId);
-        if (!this.store.slackAction(threadId, receiptKey) && (!view || !statusActions(view).includes(click.actionId))) return;
+        if (!this.store.slackAction(threadId, receiptKey)) {
+          if (!view) return;
+          if (workKey(JSON.parse(displayed.view)) !== workKey(view)) { await this.refresh(threadId); return; }
+          if (!statusActions(view).includes(click.actionId)) return;
+        }
         action = { ...base, actionId: click.actionId, ...(click.actionId === 'stop' ? {} : { operationKey: receiptKey }) };
       } else return;
       const saved = this.store.slackCard(threadId, key);
@@ -189,10 +215,10 @@ export class SlackAdapter {
       const accepted = await this.bridge.action(action);
       if (action.actionId === 'decision') {
         const decision = this.store.decision(action.decisionId)!;
-        if (decision.answer !== undefined) await this.decision({ ...JSON.parse(saved.view), ...decision, owner: thread.owner });
+        if (decision.answer !== undefined) await this.refreshDecision(threadId, action.decisionId);
       }
       if (!accepted) return;
-      if (action.actionId === 'retry') await this.result(JSON.parse(this.store.slackCard(threadId, key)!.view));
+      if (action.actionId === 'retry') await this.refreshResult(threadId, key);
       if (action.actionId !== 'log-tail') await this.refresh(threadId);
     });
   }
