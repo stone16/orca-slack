@@ -37,10 +37,13 @@ export class ReportLoop {
     await this.checkpoint('after-peek');
     this.store.persistReports(this.runId, peek);
     await this.checkpoint('after-peek-persist');
+    const reconciled = this.reconciled;
+    this.reconciled = false;
     const consumed = await this.orca.consume(this.runId);
     await this.checkpoint('after-consume');
     this.store.persistReports(this.runId, consumed);
     await this.checkpoint('after-consume-persist');
+    this.reconciled = reconciled;
     const coverage = this.store.coverage(this.runId);
     if (this.reconciled && coverage && peek.length === 0 && consumed.length === 0 &&
         !this.store.reports(this.runId).some(report => report.state === 'pending' && report.sequence === undefined)) {

@@ -10,13 +10,17 @@ class ScriptedOrca {
   history: (Message & { sequence: number; read: boolean })[] = [];
   commands: string[][] = [];
   afterPeek?: () => void;
+  afterConsume?: () => void;
   client = new CliOrca(async args => {
     this.commands.push(args);
     const result = args[1] === 'inbox'
       ? { count: Math.min(1000, this.history.length), messages: this.history.slice(-1000).toReversed() }
       : { messages: this.history.filter(row => !row.read).map(({ read, sequence, ...message }) => message) };
     const stdout = JSON.stringify({ ok: true, result });
-    if (args[1] === 'check' && !args.includes('--peek')) this.history.forEach(row => { row.read = true; });
+    if (args[1] === 'check' && !args.includes('--peek')) {
+      this.history.forEach(row => { row.read = true; });
+      this.afterConsume?.();
+    }
     if (args.includes('--peek')) this.afterPeek?.();
     return { stdout };
   });
@@ -261,5 +265,21 @@ test('idle polls retry a sequenced pending delivery without rereading inbox hist
     await loop.poll();
     expect(sent).toEqual(['report']);
     expect(scripted.commands.filter(args => args[1] === 'inbox')).toHaveLength(1);
+  } finally { store.close(); }
+});
+
+test('a lost consuming receipt invalidates live coverage evidence before a later burst', async () => {
+  const store = new Store(':memory:');
+  const scripted = new ScriptedOrca();
+  scripted.add('baseline');
+  try {
+    const loop = new ReportLoop(scripted.client, store, 'run', async () => {});
+    await loop.poll();
+    scripted.add('peeked');
+    scripted.afterPeek = () => { scripted.add('lost-late'); scripted.afterPeek = undefined; };
+    scripted.afterConsume = () => { scripted.afterConsume = undefined; throw new Error('Consuming receipt lost'); };
+    await expect(loop.poll()).rejects.toThrow('Consuming receipt lost');
+    for (let i = 0; i < 1000; i++) scripted.add(`later-${i}`);
+    expect((await loop.poll()).state).toBe('gap');
   } finally { store.close(); }
 });
