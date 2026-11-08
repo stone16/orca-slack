@@ -155,7 +155,7 @@ PR/CI 状态卡与 digest（D `digest/*`、`github/*`——GitHub 自带 Slack a
 
 1. **1.4** issue/ticket 链接当任务源要不要？要的话 Linear/Jira 读取就进 P1，整个"tracker 边界"要重新说清楚。
 2. **1.6** 路由靠规则还是 LLM？F 做了 eval 说明它觉得规则不够。
-3. **6.2** 非白名单消息"hold 等 owner 批"要不要？Zentastone 三人不需要，MoeGo 可能需要——两家配置不同就行，但代码要先有这个开关。
+3. **6.2** 非白名单消息"hold 等 owner 批"要不要？公司 Z 三人不需要，公司 M 可能需要——两家配置不同就行，但代码要先有这个开关。
 4. **7.2/7.3** 成本和并发上限怎么定、能不能测。
 5. **5.7** 空闲线程要不要自动关、多久。
 6. **6.4** Codex 没有 PreToolUse，危险命令门对 Codex 怎么做（Orca 层？`--sandbox`？不做？）。

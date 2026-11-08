@@ -104,7 +104,7 @@ wake 分类器（LLM 判断陌生人消息能不能叫醒 agent）、transcript 
 
 | # | 功能 | 说明 |
 |---|---|---|
-| 20 | Lark 入口 | 同一核心，第二个 adapter（Zentastone 用）。入口层从第一天就隔成 `adapter` 接口，别把 Slack 类型漏进核心 |
+| 20 | Lark 入口 | 同一核心，第二个 adapter（公司 Z 用）。入口层从第一天就隔成 `adapter` 接口，别把 Slack 类型漏进核心 |
 | 21 | 接管 | 线程里 `!takeover` → 回一行本地打开该 worktree 的 `orca` 命令 |
 | 22 | 评审链 | `worker_done` 后自动起不同模型的 evaluator——这属于 `stometa-mode` 的 coordinator 链，**不**在桥里做；桥只派第一跳 |
 
@@ -126,7 +126,7 @@ wake 分类器（LLM 判断陌生人消息能不能叫醒 agent）、transcript 
 ## 待 Stometa 决定
 
 1. TS 还是 Python？（上面默认 TS）
-2. 第一个试点用哪个 Slack workspace / 频道，哪个 repo 做 P0 验收任务？（默认：#leilei-orca + 一个个人 repo）
+2. 第一个试点用哪个 Slack workspace / 频道，哪个 repo 做 P0 验收任务？（默认：一个测试频道 + 一个个人 repo）
 3. GitHub 远端叫什么、放哪个 org？（本地先建，不推）
 
 ## 对齐后的改动（2026-11-07，来源 `docs/feature-matrix.md` §对齐结果）
