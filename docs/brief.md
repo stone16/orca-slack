@@ -294,7 +294,7 @@ Bridge：去重 → 保存线程 → 权限 → 转发 → 渲染四种消息
   └ 回报循环：唯一的消息消费者
 ```
 
-- **消息不丢**：`check` 读取时就标记已处理，所以回报循环先 `--peek`，写入 SQLite，再消费，并把消费返回的整批消息按 message id 写入 SQLite（peek 之后到达的消息也在这批里），然后发 Slack，发送成功才标记完成；启动时用 `inbox` 对账。Slack 入站事件也要在同一事务里写去重键和消息，转发成功才标记完成，重启时重放。
+- **消息恢复**：`check` 读取时就标记已处理，所以回报循环先 `--peek`，写入 SQLite，再消费，并把消费返回的整批消息按 message id 写入 SQLite（peek 之后到达的消息也在这批里），然后发 Slack，发送成功才标记完成；启动时用 `inbox --terminal run:<run_id> --full` 对账，必须包含已读消息，补回“消费后、整批入库前”崩溃时尚未持久化的新消息。恢复依赖 Orca 保留的 inbox 历史；覆盖范围未知时不能保证消息不丢（[实测](spikes/2026-11-08-orca-coordination.md#1-crash-recovery-at-each-boundary)）。Slack 入站事件也要在同一事务里写去重键和消息，转发成功才标记完成，重启时重放。
 
 - 一个 Slack app 对应一个 Bridge 实例，worker 数量不限。
 - 只考虑同一家公司，运行在专用机器上。
@@ -306,7 +306,7 @@ Bridge：去重 → 保存线程 → 权限 → 转发 → 渲染四种消息
 
 ## 5. 交付里程碑
 
-**开工前实测**（在账本设计之前）：`check --peek` 流程、Bridge 代建子 worktree 及跨 repo、同一 worktree 重启 session 和 `--keep-open`、Bridge 作为唯一协调者转发子 agent 回报。
+**账本设计依据**：[2026-11-08 Orca 协调实测](spikes/2026-11-08-orca-coordination.md)已验证本地 `check --peek` 恢复、Bridge 跨 repo 代建子 worktree、同一 worktree 新 session、`--keep-open` 与自动释放、Bridge 转发子 agent 回报；agent 被杀而 shell 仍存活时，自动退出判定未验证，必须显示状态未知。真实 Slack 投递仍待端到端验收。
 
 | 里程碑 | 内容 | 示例 |
 |---|---|---|
@@ -325,7 +325,7 @@ Bridge：去重 → 保存线程 → 权限 → 转发 → 渲染四种消息
 示例都是目标行为，尚未在真实 Slack 和 Orca 上跑过。需要优先实测的风险：
 
 - `question → 决定卡 → reply` 能否支撑流畅的多轮对话；端到端延迟。
-- Bridge 跨 repo 代建子 worktree；lead 恢复后能否接上子 agent 的汇报。
+- Bridge 跨 repo 代建子 worktree、已结束 lead 的新 session 接收子 agent 汇报已通过本地实测；真实 Slack 集成仍未验证。agent 进程被杀、shell 仍活着时，Orca 可能仍返回 `ready/dispatched`，投影仅变为 `unverifiable`；不能据此自动重启或声称已退出。
 - Slack 编辑消息不触发通知（标准行为，未在目标 workspace 验证）。
 - worktree 删除后 session 能否恢复。
 - Orca 启动的 agent 是否自动带上 OpenViking MCP。
