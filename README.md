@@ -19,7 +19,7 @@ Before writing anything we read the source of three open Slack→Orca bridges an
 | [dnhynk/dev-infra](https://github.com/dnhynk/dev-infra) `apps/orca-slack-bridge` | MIT | Measured facts about the `orca orchestration` CLI (e.g. `check` consumes deliveries, `worker_done.payload` is a JSON string), the "ack after persisting" discipline, decision-gate card design |
 | [pawel-kotowski/slack-agent](https://github.com/pawel-kotowski/slack-agent) | none stated | Operational lessons from its `NOTES.md`: dual `app_mention` + `message` events for one message, disabling terminal question tools, approval fatigue and what a dangerous-command gate should actually catch, keeping worktrees that hold unpushed work |
 | [facumoyano/slack-bot](https://github.com/facumoyano/slack-bot) | none stated | The thread → `worker-start` → `send`/`reply` → `worker-release` shape, one-dispatch-per-follow-up on a shared worktree, rate-limited progress messages, "post first, then record" |
-| Reference agent platform | Apache-2.0 | Its Slack ingestion dedup key `(installation, ts)` and its WebSocket wake + batch-claim transport, which told us we do not need a claim queue when the bridge and Orca share a machine |
+| [multica-ai/multica](https://github.com/multica-ai/multica) | Apache-2.0 | Its Slack ingestion dedup key `(installation, ts)` and its WebSocket wake + batch-claim transport, which told us we do not need a claim queue when the bridge and Orca share a machine |
 
 Where a referenced project has no licence, we treated it as all-rights-reserved: design observations only, cited by file and line in `docs/feature-matrix.md`, nothing reused.
 
