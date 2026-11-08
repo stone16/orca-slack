@@ -355,3 +355,35 @@ test('a worktree without a merged PR reports that reason even when a sibling has
   };
   expect(await new Cleanup(f.store, run).check(f.tree.id)).toEqual({ allowed: false, reasons: ['No merged pull request'] });
 });
+
+test('remaining worktrees stay cleanable after a sibling is deleted while its PR history is retained', async () => {
+  const first = fixture();
+  const second = fixture();
+  second.state.instanceId = 'instance-2';
+  const secondTree = { ...second.tree, repository: 'example/api' };
+  const secondPr = { ...pr, number: 21, url: 'https://github.com/example/api/pull/21' };
+  first.store.saveWorktree(secondTree);
+  const run: RunCommand = async (program, args) => {
+    if (program === 'gh' && args.includes('example/api')) return JSON.stringify([secondPr]);
+    if (program === 'orca' && args[1] === 'ps') {
+      const a = JSON.parse(await first.run(program, args));
+      const b = JSON.parse(await second.run(program, args));
+      a.result.worktrees.push(...b.result.worktrees);
+      return JSON.stringify(a);
+    }
+    const targetSecond = args.includes(`id:${secondTree.id}`) || args.includes('identity:wt2:local:instance-2') ||
+      (program === 'git' && args[1] === second.path);
+    return (targetSecond ? second.run : first.run)(program, args);
+  };
+  await new PrPoller(first.store, run).poll();
+  expect(first.store.pullRequests('thread')).toHaveLength(2);
+  const cleanup = new Cleanup(first.store, run);
+  expect(await cleanup.confirm(first.tree.id, 'U1')).toMatchObject({ status: 'deleted' });
+  expect((await cleanup.check(secondTree.id)).allowed).toBe(true);
+  second.state.status = ' M tracked.txt\0';
+  expect(await cleanup.check(secondTree.id)).toEqual({ allowed: false, reasons: ['Uncommitted or untracked changes'] });
+  second.state.status = '';
+  expect(await cleanup.confirm(secondTree.id, 'U1')).toMatchObject({ status: 'deleted' });
+  expect(first.store.pullRequests('thread')).toHaveLength(2);
+  expect(first.store.cleanupReceipts('thread').map(receipt => receipt.state)).toEqual(['deleted', 'deleted']);
+});
