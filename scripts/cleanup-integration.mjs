@@ -65,6 +65,8 @@ async function drive(name, change, expected, confirm = false) {
         assert.equal(reopened.cleanupReceipt(tree.id).state, 'saved');
         assert.equal(reopened.cleanupReceipt(tree.id).finalCommit, head);
         assert.equal(reopened.cleanupReceipt(tree.id).pullRequests[0].url, pr.url);
+        assert.equal(reopened.pullRequests('thread')[0].url, pr.url);
+        assert.equal(reopened.observedPullRequests('thread')[0].state, 'MERGED');
       } finally { reopened.close(); }
       await git(main, 'worktree', 'remove', path);
       state.present = false;
@@ -89,7 +91,7 @@ async function drive(name, change, expected, confirm = false) {
     assert.equal(await git(main, 'status', '--porcelain=v1'), '', 'main checkout clean');
     const row = { case: name, allowed: checked.allowed, reasons: checked.reasons,
       realGitInspections: state.gitCommands, verdict: 'verified', ...(confirm ? {
-        finalCommit: head, squashCommit: mainHead, receiptSavedBeforeDeletion: true, deletionCommands: 1,
+        finalCommit: head, squashCommit: mainHead, receiptSavedBeforeDeletion: true, mergedStateSavedBeforeDeletion: true, deletionCommands: 1,
       } : {}) };
     results.push(row);
     console.log(JSON.stringify(row));

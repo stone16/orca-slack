@@ -13,22 +13,32 @@ export class PrPoller {
     const timer = setInterval(() => {
       if (busy) return;
       busy = true;
-      void this.poll().then(async result => {
-        for (const change of result.changes) {
-          try { await onChange(change); }
-          catch { await reportFailure({ worktreeId: change.worktreeId, reason: 'PR change callback failed' }); }
-        }
+      void this.poll(undefined, onChange).then(async result => {
         for (const failure of result.failures) await reportFailure(failure);
       }).finally(() => { busy = false; });
     }, 60_000);
     return () => clearInterval(timer);
   }
-  async poll(threadId?: string): Promise<PollResult> {
+  async poll(threadId?: string, onChange?: (change: ObservedPullRequest) => void | Promise<void>): Promise<PollResult> {
     const result: PollResult = { changes: [], failures: [] };
     for (const tree of this.store.trackedWorktrees(threadId)) {
       try {
-        result.changes.push(...this.store.observePullRequests(await queryPullRequests(tree, this.run)));
+        this.store.observePullRequests(await queryPullRequests(tree, this.run));
       } catch { result.failures.push({ worktreeId: tree.id, reason: 'GitHub poll failed' }); }
+    }
+    const blocked = new Set<string>();
+    for (const change of this.store.pendingPullRequestChanges(threadId)) {
+      if (blocked.has(change.pullRequest.id)) continue;
+      if (onChange) {
+        try { await onChange(change.pullRequest); }
+        catch {
+          blocked.add(change.pullRequest.id);
+          result.failures.push({ worktreeId: change.pullRequest.worktreeId, reason: 'PR change callback failed' });
+          continue;
+        }
+      }
+      result.changes.push(change.pullRequest);
+      this.store.markPullRequestChangeDelivered(change.id);
     }
     return result;
   }

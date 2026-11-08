@@ -414,3 +414,19 @@ test.each(['unseen', 'open'])('cleanup persists a PR merged between polls before
     expect(reopened.trackedWorktrees('thread')).toEqual([]);
   } finally { reopened.close(); }
 });
+
+test('a merged change saved by cleanup survives reopen and is reported once after worktree deletion', async () => {
+  const f = fixture();
+  f.state.prs = [{ ...pr, state: 'OPEN' }];
+  await new PrPoller(f.store, f.run).poll();
+  f.state.prs = [pr];
+  expect(await new Cleanup(f.store, f.run).confirm(f.tree.id, 'U1')).toMatchObject({ status: 'deleted' });
+  const ghCalls = f.calls.filter(([program]) => program === 'gh').length;
+  const reopened = new Store(f.file);
+  try {
+    const poller = new PrPoller(reopened, f.run);
+    expect((await poller.poll()).changes).toEqual([{ ...pr, id: pr.url, worktreeId: f.tree.id }]);
+    expect((await poller.poll()).changes).toEqual([]);
+    expect(f.calls.filter(([program]) => program === 'gh')).toHaveLength(ghCalls);
+  } finally { reopened.close(); }
+});
