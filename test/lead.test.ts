@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,7 +23,7 @@ function setup(file = ':memory:') {
   let failure: string | undefined;
   let changeSource = false;
   let partialLaunch = false;
-  let state = { projection: { liveness: { verdict: 'live' }, attention: { requiresAction: false } }, observation: { agentWait: null as unknown } };
+  let state = { projection: { liveness: { verdict: 'live', source: 'agent_status' }, attention: { categories: [] as string[], requiresAction: false } }, observation: { status: 'live', exactWorker: true, agentWait: null as unknown } };
   let read = { source: 'transcript', cursor: 'w1' };
   let terminal = { status: 'running', source: 'stream', nextCursor: 't1' };
   const reports: Report[] = [];
@@ -50,7 +51,8 @@ function setup(file = ':memory:') {
     sourceChange: () => { changeSource = true; },
     noWaitEvidence: () => { state.observation.agentWait = undefined; },
     fail: (verb: string | undefined) => { failure = verb; },
-    unknown: () => { state = { projection: { liveness: { verdict: 'unverifiable' }, attention: { requiresAction: true } }, observation: { agentWait: null } }; },
+    liveness: (verdict: string) => { state.projection.liveness.verdict = verdict; },
+    unknown: () => { state = { projection: { liveness: { verdict: 'unverifiable', source: 'agent_status' }, attention: { categories: ['unverifiable'], requiresAction: true } }, observation: { status: 'live', exactWorker: true, agentWait: null } }; },
     wait: () => { state.observation.agentWait = { reason: 'human prompt' }; },
     read: (source: string, cursor: string) => { read = { source, cursor }; },
     terminal: (status: string, cursor = 't1', source = 'stream') => { terminal = { status, source, nextCursor: cursor }; },
@@ -354,4 +356,135 @@ test('source_changed resets frozen evidence even when source labels and cursor v
   h.sourceChange();
   await h.leads.poll();
   expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('unknown');
+});
+
+test('B1 only an explicit unverifiable verdict can arm interruption', async () => {
+  const h = setup();
+  await h.bridge.event(event);
+  h.unknown();
+  h.liveness('unknown');
+  for (let n = 0; n < 4; n++) await h.leads.poll();
+  expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('unknown');
+});
+
+test('B2 a live poll cannot count toward the subsequent unknown grace window', async () => {
+  const h = setup();
+  await h.bridge.event(event);
+  await h.leads.poll();
+  h.unknown();
+  await h.leads.poll();
+  expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('unknown');
+  await h.leads.poll();
+  expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('unknown');
+  await h.leads.poll();
+  expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('interrupted');
+});
+
+test('B3 owner free text answers an optioned question and later messages still forward', async () => {
+  const h = setup();
+  await h.bridge.event(event);
+  await h.leads.report(report('question', {}, '{"question":"Which records?","options":["orders","users"]}', 'question'));
+  await h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'answer', text: 'orders, for finance, filtered by month' });
+  await h.bridge.event({ ...event, ts: '3', threadTs: '1', eventId: 'later', text: 'Include CSV' });
+  expect(h.store.decision('question')?.answer).toBe('orders, for finance, filtered by month');
+  expect(calls(h.commands, 'reply')).toHaveLength(1);
+  expect(argument(calls(h.commands, 'send')[0], '--body')).toBe('Include CSV');
+  expect(h.store.inbound(threadId).every(message => message.state !== 'pending')).toBe(true);
+});
+
+test('B3 an empty mention cannot block the next answer or later peer instructions', async () => {
+  const h = setup();
+  await h.bridge.event(event);
+  await h.leads.report(report('question', {}, '{"question":"Which records?","options":["orders","users"]}', 'question'));
+  await h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'empty', text: '<@BOT>' });
+  await h.bridge.event({ ...event, ts: '3', threadTs: '1', eventId: 'answer', text: 'orders' });
+  await h.bridge.event({ ...event, ts: '4', threadTs: '1', eventId: 'peer', user: 'peer', text: '<@BOT> Include CSV' });
+  expect(h.store.inbound(threadId).map(message => message.state)).toEqual(['forwarded', 'archived', 'forwarded', 'forwarded']);
+  expect(h.store.decision('question')?.answer).toBe('orders');
+  expect(calls(h.commands, 'send')).toHaveLength(1);
+});
+
+test.each(['button', 'late question', 'late completion'])('B4 interruption survives a %s without delivery or replacement', async source => {
+  const h = setup();
+  await h.bridge.event(event);
+  await h.leads.report(report('question', {}, '{"question":"Which records?","options":["orders"]}', 'question'));
+  h.terminal('exited');
+  await h.leads.poll();
+  const offset = h.commands.length;
+  if (source === 'button') expect(await h.bridge.action({ actionId: 'decision', threadId, channel: 'channel', user: 'owner', decisionId: 'question', option: 'orders' })).toBe(false);
+  if (source === 'late question') await h.leads.report(report('question', {}, 'A queued question', 'later-question'));
+  if (source === 'late completion') await h.leads.report(report('worker_done', { outcome: 'succeeded' }, 'A queued completion', 'later-done'));
+  await h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'next', text: 'Continue' });
+  await h.leads.poll();
+  expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('interrupted');
+  expect(h.store.leadSessions(threadId)[0].active).toBe(true);
+  expect(h.commands.slice(offset)).toEqual([]);
+});
+
+function diskSetup() {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-atomic-'));
+  roots.push(root);
+  const file = join(root, 'ledger.sqlite');
+  return { ...setup(file), file };
+}
+function abortInboundCommit(file: string) {
+  const db = new DatabaseSync(file);
+  try { db.exec(`CREATE TRIGGER abort_forward BEFORE UPDATE ON inbound WHEN NEW.state='forwarded'
+    BEGIN SELECT RAISE(ABORT, 'injected SQLite boundary failure'); END`); }
+  finally { db.close(); }
+}
+
+test('SF1 launch settlement rolls back session, event, and inbound markers together', async () => {
+  const h = diskSetup();
+  abortInboundCommit(h.file);
+  await expect(h.bridge.event(event)).rejects.toThrow('injected SQLite boundary failure');
+  expect(calls(h.commands, 'worker-start')).toHaveLength(1);
+  expect(h.store.leadSessions(threadId)).toEqual([]);
+  expect(h.store.leadEvents(threadId).some(event => event.kind === 'started')).toBe(false);
+  expect(h.store.pendingLaunch(threadId)).toBeTruthy();
+  expect(h.store.inbound(threadId)[0].state).toBe('pending');
+});
+
+test('SF1 reply settlement rolls back decision, event, and inbound markers together', async () => {
+  const h = diskSetup();
+  await h.bridge.event(event);
+  await h.leads.report(report('question', {}, 'Which records?', 'question'));
+  abortInboundCommit(h.file);
+  await expect(h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'answer', text: 'orders' })).rejects.toThrow('injected SQLite boundary failure');
+  expect(calls(h.commands, 'reply')).toHaveLength(1);
+  expect(h.store.decision('question')?.answer).toBeUndefined();
+  expect(h.store.leadEvents(threadId).some(event => event.kind === 'answered')).toBe(false);
+  expect(h.store.inbound(threadId).at(-1)?.state).toBe('pending');
+});
+
+test('SF2 failed stop preserves pending prompts until a successful replay', async () => {
+  const h = setup();
+  await h.bridge.event(event);
+  h.fail('send');
+  await expect(h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'pending', text: 'Keep this request' })).rejects.toThrow('uncertain command');
+  h.fail('worker-stop');
+  await expect(h.bridge.event({ ...event, ts: '3', threadTs: '1', eventId: 'stop', text: '!stop' })).rejects.toThrow('uncertain command');
+  expect(h.store.inbound(threadId).map(message => message.state)).toEqual(['forwarded', 'pending', 'pending']);
+  h.fail(undefined);
+  await h.bridge.replay();
+  expect(h.store.inbound(threadId).map(message => message.state)).toEqual(['forwarded', 'archived', 'forwarded']);
+});
+
+test('SF2 distinct partial launches each retain their own stopped event', async () => {
+  const h = setup();
+  h.partialLaunch();
+  await expect(h.bridge.event(event)).rejects.toThrow('uncertain command');
+  await h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'stop-first', text: '!stop' });
+  await expect(h.bridge.event({ ...event, ts: '3', threadTs: '1', eventId: 'retry', text: 'Continue' })).rejects.toThrow('uncertain command');
+  await h.bridge.event({ ...event, ts: '4', threadTs: '1', eventId: 'stop-second', text: '!stop' });
+  expect(h.store.leadEvents(threadId).filter(event => event.kind === 'stopped')).toHaveLength(2);
+  expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('stopped');
+});
+
+test('B1 the measured full worker-show projection keeps a healthy lead running', async () => {
+  const h = setup();
+  await h.bridge.event(event);
+  await h.leads.poll();
+  expect(calls(h.commands, 'worker-show')).toEqual([['orchestration', 'worker-show', '--dispatch', 'dispatch-1', '--json', '--full']]);
+  expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('running');
 });

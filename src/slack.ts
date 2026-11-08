@@ -44,9 +44,9 @@ export class Bridge {
     if (failed) throw failed.reason;
   }
   private async stop(threadId: string, messageKey?: string): Promise<void> {
-    this.store.archivePendingPrompts(threadId, messageKey);
     if (this.leads) {
-      await this.leads.stop(threadId);
+      await this.leads.stop(threadId, messageKey);
+      this.store.archivePendingPrompts(threadId, messageKey);
       if (messageKey) this.store.markInboundForwarded(messageKey);
       return;
     }
@@ -55,6 +55,7 @@ export class Bridge {
       await this.orca.call('worker-stop', ['--dispatch', lead.dispatchId]);
       this.store.endLead(lead.id);
     }
+    this.store.archivePendingPrompts(threadId, messageKey);
     if (messageKey) this.store.markInboundForwarded(messageKey);
   }
   private async forwardPending(threadId: string): Promise<void> {

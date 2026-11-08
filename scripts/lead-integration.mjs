@@ -57,7 +57,14 @@ async function bridge(root, repository) {
     state.dispatchId = session.dispatchId;
     state.worktreeId = session.worktreeId;
     save(root, 'state.json', state);
+    const plain = await cli(['orchestration', 'worker-show', '--dispatch', session.dispatchId]);
+    const full = await cli(['orchestration', 'worker-show', '--dispatch', session.dispatchId, '--full']);
+    state.workerShow = {
+      plain: { keys: Object.keys(plain), liveness: plain.liveness },
+      full: { keys: Object.keys(full), projection: { liveness: full.projection?.liveness, attention: full.projection?.attention } },
+    };
     await leads.poll();
+    assert.equal(store.leadEvents(threadId).at(-1)?.kind, 'running', JSON.stringify(state.workerShow));
     assert.ok(store.leadObservation(session.id), 'real worker and terminal read cursors saved');
     let questionId;
     let doneId;
@@ -86,7 +93,7 @@ async function bridge(root, repository) {
     assert.equal(store.leadEvents(threadId).at(-1).kind, 'completed');
     settled = true;
     state.evidence = { runId: state.runId, dispatchId: state.dispatchId, questionId, doneId,
-      decisionSaved: true, ownerReplySaved: true, leadCompleted: true, readCursorsSaved: true };
+      decisionSaved: true, ownerReplySaved: true, leadCompleted: true, readCursorsSaved: true, leadEventKind: 'running', workerShow: state.workerShow };
   } catch (error) {
     if (error instanceof OrcaError && error.receipt.dispatchId) state.dispatchId = error.receipt.dispatchId;
     state.error = String(error.message).replaceAll(root, '<temporary>');

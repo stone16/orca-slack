@@ -71,4 +71,4 @@ npm run build
 node scripts/lead-integration.mjs
 ```
 
-The driver uses only a disposable repository, worktree, terminal, and Run. It asks one question, saves and answers the decision, receives completion, and removes its live resources. See the [acceptance evidence](docs/verification/2026-11-08-lead-routing.md) for the named tests, real IDs, and limits.
+The driver uses only a disposable repository, worktree, terminal, and Run. It asks one question, saves and answers the decision, receives completion, and removes its live resources.
