@@ -187,3 +187,15 @@ test('an outsider stop message is refused without storage or an Orca command', a
     expect(ports.refused).toEqual(['C1:OUTSIDER']);
   } finally { store.close(); }
 });
+
+test('a successful stop retires the lead session and preserves the thread and worktree', async () => {
+  const store = new Store(':memory:');
+  seed(store);
+  const ports = boundary();
+  try {
+    await new Bridge(ports.orca, ports.slack, store, ['U1', 'U2'], 'BOT').event({ ...event, user: 'U2', text: '!stop' });
+    expect(store.leadSessions('thread')[0].active).toBe(false);
+    expect(store.thread('thread')?.owner).toBe('U1');
+    expect(store.worktrees('thread')).toHaveLength(1);
+  } finally { store.close(); }
+});

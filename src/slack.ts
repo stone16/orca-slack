@@ -43,6 +43,7 @@ export class Bridge {
       if (!lead) continue;
       if (message.kind === 'stop') {
         await this.orca.call('worker-stop', ['--dispatch', lead.dispatchId]);
+        this.store.endLead(lead.id);
       } else {
         await this.orca.call('send', ['--to', `dispatch:${lead.dispatchId}`, '--run', lead.runId,
           '--type', 'status', '--subject', 'Slack follow-up', '--body', this.text(message.text)]);
@@ -60,7 +61,10 @@ export class Bridge {
       }
       const lead = this.store.leadSessions(thread.id).find(session => session.active);
       if (action.actionId === 'stop') {
-        if (lead) await this.orca.call('worker-stop', ['--dispatch', lead.dispatchId]);
+        if (lead) {
+          await this.orca.call('worker-stop', ['--dispatch', lead.dispatchId]);
+          this.store.endLead(lead.id);
+        }
       } else if (action.actionId === 'decision') {
         const decision = this.store.decision(action.decisionId);
         if (!lead || !decision || decision.threadId !== thread.id || decision.answer !== undefined ||
