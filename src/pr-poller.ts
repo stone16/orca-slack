@@ -6,12 +6,18 @@ export class PrPoller {
   constructor(private store: Store, private run: RunCommand = runCommand) {}
   start(onChange: (change: ObservedPullRequest) => void, onFailure: (failure: PollResult['failures'][number]) => void): () => void {
     let busy = false;
+    const reportFailure = (failure: PollResult['failures'][number]) => {
+      try { onFailure(failure); } catch {}
+    };
     const timer = setInterval(() => {
       if (busy) return;
       busy = true;
       void this.poll().then(result => {
-        result.changes.forEach(onChange);
-        result.failures.forEach(onFailure);
+        for (const change of result.changes) {
+          try { onChange(change); }
+          catch { reportFailure({ worktreeId: change.worktreeId, reason: 'PR change callback failed' }); }
+        }
+        result.failures.forEach(reportFailure);
       }).finally(() => { busy = false; });
     }, 60_000);
     return () => clearInterval(timer);

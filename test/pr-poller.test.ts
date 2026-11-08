@@ -124,3 +124,38 @@ test('poll accepts the full branch ref reported by Orca and queries gh with its 
   await new PrPoller(store, async (_program, args) => { calls.push(args); return '[]'; }).poll();
   expect(calls[1].slice(4, 6)).toEqual(['--head', 'feat/api']);
 });
+
+test.each(['change', 'failure'])('a throwing %s callback is contained and the next poll still runs', async callback => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  const store = ledger();
+  const unhandled: unknown[] = [];
+  const listener = (error: unknown) => { unhandled.push(error); };
+  process.on('unhandledRejection', listener);
+  let polls = 0;
+  const poller = new PrPoller(store, async () => {
+    polls++;
+    if (callback === 'failure' && polls === 1) throw new Error('gh offline');
+    return JSON.stringify([{ ...open, headRefOid: polls === 1 ? 'a'.repeat(40) : 'b'.repeat(40) }]);
+  });
+  let changes = 0;
+  const failures: unknown[] = [];
+  const stop = poller.start(() => {
+    changes++;
+    if (callback === 'change' && changes === 1) throw new Error('change callback failed');
+  }, failure => {
+    failures.push(failure);
+    if (callback === 'failure') throw new Error('failure callback failed');
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(120_000);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(unhandled).toEqual([]);
+    expect(polls).toBe(2);
+    expect(changes).toBe(callback === 'change' ? 2 : 1);
+    expect(failures).toEqual([{ worktreeId: 'tree', reason: callback === 'change'
+      ? 'PR change callback failed' : 'GitHub poll failed' }]);
+  } finally {
+    stop();
+    process.off('unhandledRejection', listener);
+  }
+});
