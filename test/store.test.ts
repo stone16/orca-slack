@@ -68,3 +68,34 @@ test('decision options and the answering user survive reopening and cannot be an
       slackTs: '2', answer: 'continue', answeredBy: 'U1' });
   } finally { store.close(); }
 });
+
+test.each([
+  ['legacy-pr', 'https://github.com/example/web/pull/12'],
+  ['https://github.com/example/web/pull/12', 'new-pr'],
+])('a PR URL cannot be observed under another worktree regardless of its saved id (%s)', (savedId, observedId) => {
+  const store = new Store(':memory:');
+  try {
+    store.saveThread({ id: 'thread', channel: 'C1', threadTs: '1', owner: 'U1' });
+    store.saveWorktree({ id: 'first', threadId: 'thread', repository: 'example/web', branch: 'feat/first' });
+    store.saveWorktree({ id: 'second', threadId: 'thread', repository: 'example/web', branch: 'feat/second' });
+    const url = 'https://github.com/example/web/pull/12';
+    store.savePullRequest({ id: savedId, worktreeId: 'first', url });
+    expect(() => store.observePullRequests([{ id: observedId, worktreeId: 'second', url,
+      number: 12, state: 'MERGED', headRefOid: 'a'.repeat(40) }])).toThrow('Pull request belongs to another worktree');
+    expect(store.pullRequests('thread')).toEqual([{ id: savedId, worktreeId: 'first', url }]);
+    expect(store.observedPullRequests('thread')).toEqual([]);
+  } finally { store.close(); }
+});
+
+test('saving a PR link cannot give the same URL to another worktree under a new id', () => {
+  const store = new Store(':memory:');
+  try {
+    store.saveThread({ id: 'thread', channel: 'C1', threadTs: '1', owner: 'U1' });
+    store.saveWorktree({ id: 'first', threadId: 'thread', repository: 'example/web', branch: 'feat/first' });
+    store.saveWorktree({ id: 'second', threadId: 'thread', repository: 'example/web', branch: 'feat/second' });
+    const url = 'https://github.com/example/web/pull/12';
+    store.savePullRequest({ id: 'legacy-pr', worktreeId: 'first', url });
+    expect(() => store.savePullRequest({ id: 'duplicate', worktreeId: 'second', url })).toThrow(/UNIQUE/);
+    expect(store.pullRequests('thread')).toEqual([{ id: 'legacy-pr', worktreeId: 'first', url }]);
+  } finally { store.close(); }
+});
