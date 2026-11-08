@@ -1,0 +1,110 @@
+import { DatabaseSync } from 'node:sqlite';
+
+export interface Thread {
+  id: string; channel: string; threadTs: string; owner: string; linearTicket?: string;
+}
+export interface Worktree {
+  id: string; threadId: string; repository: string; branch: string;
+}
+export interface PullRequest { id: string; worktreeId: string; url: string }
+export interface LeadSession {
+  id: string; threadId: string; worktreeId: string; runId: string;
+  taskId: string; dispatchId: string; handle: string; active: boolean;
+}
+export interface Decision {
+  id: string; threadId: string; options: string[]; slackTs: string;
+  answer?: string; answeredBy?: string;
+}
+
+export class Store {
+  private db: DatabaseSync;
+  constructor(file: string) {
+    this.db = new DatabaseSync(file);
+    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+      PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
+      CREATE TABLE IF NOT EXISTS threads (
+        id TEXT PRIMARY KEY, channel TEXT NOT NULL, threadTs TEXT NOT NULL,
+        owner TEXT NOT NULL, linearTicket TEXT, UNIQUE(channel, threadTs));
+      CREATE TABLE IF NOT EXISTS worktrees (
+        id TEXT PRIMARY KEY, threadId TEXT NOT NULL REFERENCES threads(id),
+        repository TEXT NOT NULL, branch TEXT NOT NULL, UNIQUE(id, threadId));
+      CREATE TABLE IF NOT EXISTS pull_requests (
+        id TEXT PRIMARY KEY, worktreeId TEXT NOT NULL REFERENCES worktrees(id), url TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS lead_sessions (
+        id TEXT PRIMARY KEY, threadId TEXT NOT NULL REFERENCES threads(id), worktreeId TEXT NOT NULL,
+        runId TEXT NOT NULL, taskId TEXT NOT NULL, dispatchId TEXT NOT NULL UNIQUE,
+        handle TEXT NOT NULL, active INTEGER NOT NULL CHECK(active IN (0, 1)),
+        FOREIGN KEY(worktreeId, threadId) REFERENCES worktrees(id, threadId));
+      CREATE UNIQUE INDEX IF NOT EXISTS active_lead ON lead_sessions(threadId) WHERE active=1;
+      CREATE TABLE IF NOT EXISTS decisions (
+        id TEXT PRIMARY KEY, threadId TEXT NOT NULL REFERENCES threads(id),
+        options TEXT NOT NULL, slackTs TEXT NOT NULL, answer TEXT, answeredBy TEXT);`);
+  }
+  private transaction<T>(work: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  saveThread(thread: Thread): void {
+    this.db.prepare(`INSERT INTO threads VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, linearTicket=excluded.linearTicket`)
+      .run(thread.id, thread.channel, thread.threadTs, thread.owner, thread.linearTicket ?? null);
+  }
+  thread(id: string): Thread | undefined {
+    const row = this.db.prepare('SELECT * FROM threads WHERE id=?').get(id);
+    if (!row) return undefined;
+    const { linearTicket, ...thread } = row;
+    return { ...thread, ...(linearTicket === null ? {} : { linearTicket }) } as Thread;
+  }
+  findThread(channel: string, threadTs: string): Thread | undefined {
+    const row = this.db.prepare('SELECT id FROM threads WHERE channel=? AND threadTs=?').get(channel, threadTs);
+    return row ? this.thread(row.id as string) : undefined;
+  }
+  saveWorktree(tree: Worktree): void {
+    this.db.prepare('INSERT INTO worktrees VALUES (?, ?, ?, ?)')
+      .run(tree.id, tree.threadId, tree.repository, tree.branch);
+  }
+  worktrees(threadId: string): Worktree[] {
+    return this.db.prepare('SELECT * FROM worktrees WHERE threadId=? ORDER BY rowid').all(threadId) as unknown as Worktree[];
+  }
+  savePullRequest(pr: PullRequest): void {
+    this.db.prepare('INSERT INTO pull_requests VALUES (?, ?, ?)').run(pr.id, pr.worktreeId, pr.url);
+  }
+  pullRequests(threadId: string): PullRequest[] {
+    return this.db.prepare(`SELECT p.* FROM pull_requests p JOIN worktrees w ON w.id=p.worktreeId
+      WHERE w.threadId=? ORDER BY p.rowid`).all(threadId) as unknown as PullRequest[];
+  }
+  replaceLead(session: Omit<LeadSession, 'active'>): void {
+    this.transaction(() => {
+      this.db.prepare('UPDATE lead_sessions SET active=0 WHERE threadId=?').run(session.threadId);
+      this.db.prepare('INSERT INTO lead_sessions VALUES (?, ?, ?, ?, ?, ?, ?, 1)')
+        .run(session.id, session.threadId, session.worktreeId, session.runId,
+          session.taskId, session.dispatchId, session.handle);
+    });
+  }
+  leadSessions(threadId: string): LeadSession[] {
+    return this.db.prepare('SELECT * FROM lead_sessions WHERE threadId=? ORDER BY rowid').all(threadId)
+      .map(row => ({ ...row, active: row.active === 1 })) as unknown as LeadSession[];
+  }
+  saveDecision(decision: Omit<Decision, 'answer' | 'answeredBy'>): void {
+    this.db.prepare('INSERT INTO decisions VALUES (?, ?, ?, ?, NULL, NULL)')
+      .run(decision.id, decision.threadId, JSON.stringify(decision.options), decision.slackTs);
+  }
+  decision(id: string): Decision | undefined {
+    const row = this.db.prepare('SELECT * FROM decisions WHERE id=?').get(id);
+    if (!row) return undefined;
+    const { options, answer, answeredBy, ...rest } = row;
+    return { ...rest, options: JSON.parse(options as string),
+      ...(answer === null ? {} : { answer, answeredBy }) } as Decision;
+  }
+  answerDecision(id: string, answer: string, user: string): boolean {
+    const decision = this.decision(id);
+    if (!decision?.options.includes(answer)) return false;
+    return this.db.prepare('UPDATE decisions SET answer=?, answeredBy=? WHERE id=? AND answer IS NULL')
+      .run(answer, user, id).changes === 1;
+  }
+  close(): void { this.db.close(); }
+}
