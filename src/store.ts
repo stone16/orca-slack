@@ -156,11 +156,12 @@ export class Store {
   markReportSent(runId: string, id: string): void {
     this.db.prepare("UPDATE reports SET state='sent' WHERE runId=? AND id=?").run(runId, id);
   }
-  reconcileInbox(runId: string, inbox: Inbox): Coverage {
+  reconcileInbox(runId: string, inbox: Inbox, observedIds: readonly string[] = []): Coverage {
     return this.transaction(() => {
       const oldest = inbox.messages.reduce<Inbox['messages'][number] | undefined>(
         (a, b) => !a || b.sequence < a.sequence ? b : a, undefined);
-      const complete = inbox.count < 1000 || (oldest && this.hasReport(runId, oldest.id, oldest.sequence));
+      const complete = inbox.count < 1000 || (oldest && (this.hasReport(runId, oldest.id, oldest.sequence) ||
+        (this.coverage(runId)?.state === 'complete' && observedIds.includes(oldest.id))));
       const coverage: Coverage = { state: complete && this.coverage(runId)?.state !== 'gap' ? 'complete' : 'gap',
         count: inbox.count };
       this.writeReports(runId, inbox.messages);

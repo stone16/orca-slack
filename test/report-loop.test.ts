@@ -8,8 +8,10 @@ import { Store } from '../src/store.js';
 
 class ScriptedOrca {
   history: (Message & { sequence: number; read: boolean })[] = [];
+  commands: string[][] = [];
   afterPeek?: () => void;
   client = new CliOrca(async args => {
+    this.commands.push(args);
     const result = args[1] === 'inbox'
       ? { count: Math.min(1000, this.history.length), messages: this.history.slice(-1000).toReversed() }
       : { messages: this.history.filter(row => !row.read).map(({ read, sequence, ...message }) => message) };
@@ -201,5 +203,63 @@ test('an aged-out saved report without a sequence is delivered without blocking 
     expect(sent).toContain('aged-report');
     expect(store.reports('run').find(row => row.id === 'aged-report')).toMatchObject({ state: 'sent' });
     expect(store.coverage('run')?.state).toBe('gap');
+  } finally { store.close(); }
+});
+
+test('initialized idle polls do not reread the inbox history page', async () => {
+  const store = new Store(':memory:');
+  const scripted = new ScriptedOrca();
+  try {
+    const loop = new ReportLoop(scripted.client, store, 'run', async () => {});
+    await loop.recover();
+    await loop.poll();
+    await loop.poll();
+    expect(scripted.commands.filter(args => args[1] === 'inbox')).toHaveLength(1);
+  } finally { store.close(); }
+});
+
+test.each([1000, 1001])('a fully persisted burst of %s reports preserves established complete coverage', async count => {
+  const store = new Store(':memory:');
+  const scripted = new ScriptedOrca();
+  scripted.add('baseline');
+  const sent: string[] = [];
+  try {
+    const loop = new ReportLoop(scripted.client, store, 'run', async report => { sent.push(report.id); });
+    await loop.poll();
+    for (let i = 0; i < count; i++) scripted.add(`burst-${i}`);
+    expect(await loop.poll()).toEqual({ state: 'complete', count: 1000 });
+    expect(sent).toHaveLength(count + 1);
+    expect(store.coverage('run')?.state).toBe('complete');
+  } finally { store.close(); }
+});
+
+test('a replacement consumer still detects a startup gap despite fresh persisted burst ids', async () => {
+  const store = new Store(':memory:');
+  const scripted = new ScriptedOrca();
+  scripted.add('baseline');
+  try {
+    await new ReportLoop(scripted.client, store, 'run', async () => {}).poll();
+    for (let i = 0; i < 1000; i++) scripted.add(`new-${i}`);
+    const restarted = new ReportLoop(scripted.client, store, 'run', async () => {});
+    expect((await restarted.poll()).state).toBe('gap');
+  } finally { store.close(); }
+});
+
+test('idle polls retry a sequenced pending delivery without rereading inbox history', async () => {
+  const store = new Store(':memory:');
+  const scripted = new ScriptedOrca();
+  scripted.add('report');
+  let available = false;
+  const sent: string[] = [];
+  try {
+    const loop = new ReportLoop(scripted.client, store, 'run', async report => {
+      if (!available) throw new Error('Slack unavailable');
+      sent.push(report.id);
+    });
+    await expect(loop.poll()).rejects.toThrow('Slack unavailable');
+    available = true;
+    await loop.poll();
+    expect(sent).toEqual(['report']);
+    expect(scripted.commands.filter(args => args[1] === 'inbox')).toHaveLength(1);
   } finally { store.close(); }
 });
