@@ -55,16 +55,38 @@ function button(actionId: string, text: string, value: object): Button {
   if (encoded.length > 2000) throw new Error('Button value exceeds Slack limit');
   return { type: 'button', action_id: actionId, text: { type: 'plain_text', text: text.slice(0, 75) }, value: encoded };
 }
+function chunks(text: string, limit: number, count: number): string[] {
+  const parts: string[] = [];
+  let part = '';
+  for (const match of text.matchAll(/<[^>]*>|&(?:amp|lt|gt);|[\s\S]/gu)) {
+    const unit = match[0].length < limit ? match[0] : '…';
+    if (part.length + unit.length >= limit) {
+      parts.push(part);
+      if (parts.length === count) {
+        parts[parts.length - 1] += '…';
+        return parts;
+      }
+      part = '';
+    }
+    part += unit;
+  }
+  if (part) parts.push(part);
+  return parts;
+}
 function post(lines: string[], buttons: Button[] = [], context?: string): SlackPost {
-  const blocks = lines.flatMap(line => {
-    const sections: Block[] = [];
-    for (let i = 0; i < line.length; i += 3000) sections.push(section(line.slice(i, i + 3000)));
-    return sections;
-  });
-  for (let i = 0; i < buttons.length; i += 25) blocks.push({ type: 'actions', elements: buttons.slice(i, i + 25) });
-  if (context) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: context }] });
-  if (blocks.length > 50) throw new Error('Message exceeds Slack block limit');
-  return { text: [...lines, ...(context ? [context] : [])].join('\n'), blocks };
+  const actions: Block[] = [];
+  for (let i = 0; i < buttons.length && actions.length < (context ? 48 : 49); i += 25) {
+    actions.push({ type: 'actions', elements: buttons.slice(i, i + 25) });
+  }
+  const blocks: Block[] = [];
+  const budget = 50 - actions.length - (context ? 1 : 0);
+  for (const line of lines) {
+    if (blocks.length === budget) break;
+    blocks.push(...chunks(line, 3000, budget - blocks.length).map(section));
+  }
+  blocks.push(...actions);
+  if (context) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: chunks(context, 3000, 1)[0] }] });
+  return { text: chunks([...lines, ...(context ? [context] : [])].join('\n'), 4000, 1)[0], blocks };
 }
 export function renderStatus(view: StatusView): SlackPost {
   const lines = [`${escapeSlack(view.title)} · ${labels[view.state]}`];
@@ -87,8 +109,8 @@ export function renderDecision(view: DecisionView): SlackPost {
 }
 export function renderResult(view: ResultView): SlackPost {
   const text = `${view.outcome === 'failed' ? '❌' : '✅'} ${view.needsAttention ? `<@${view.owner}> ` : ''}${escapeSlack(view.text)}`;
-  return post([text], view.outcome === 'failed' && !view.retriedBy ? [
-    button('retry', '重试', { threadId: view.threadId, resultId: view.id }),
+  return post([text], view.outcome === 'failed' ? [
+    ...(!view.retriedBy ? [button('retry', '重试', { threadId: view.threadId, resultId: view.id })] : []),
     button('log-tail', '查看日志尾部', { threadId: view.threadId, resultId: view.id }),
   ] : [], view.retriedBy ? `已重试 · <@${view.retriedBy}>` : undefined);
 }

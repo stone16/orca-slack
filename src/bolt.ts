@@ -21,6 +21,8 @@ export interface AdapterOptions {
   logTail(threadId: string): Promise<string>;
 }
 interface Click { actionId: string; value: string; channel: string; user: string; messageTs: string; triggerId: string }
+function workKey(view: StatusView): string { return JSON.stringify(view.worktrees.map(tree => tree.id).sort()); }
+function operationKey(key: string, action: string, scope = ''): string { return JSON.stringify([key, action, scope]); }
 
 export class SlackAdapter {
   readonly bridge: Bridge;
@@ -37,7 +39,12 @@ export class SlackAdapter {
     await this.slack.chat.postEphemeral({ channel, user, text: '你没有操作此桥的权限。' });
   }
   async ownerAction(action: Action): Promise<void> {
-    if (action.actionId !== 'log-tail') return this.options.ownerAction(action);
+    if (action.actionId !== 'log-tail') {
+      if (action.operationKey && this.store.slackAction(action.threadId, action.operationKey)) return;
+      await this.options.ownerAction(action);
+      if (action.operationKey) this.store.saveSlackAction(action.threadId, action.operationKey, action.user);
+      return;
+    }
     const tail = (await this.options.logTail(action.threadId)).split('\n').slice(-40).join('\n').slice(-3000) || '(empty log)';
     await this.slack.views.open({ trigger_id: action.triggerId, view: { type: 'modal',
       title: { type: 'plain_text', text: '日志尾部' }, close: { type: 'plain_text', text: '关闭' },
@@ -51,6 +58,8 @@ export class SlackAdapter {
       if (!thread) throw new Error('Unknown Slack thread');
       const saved = this.store.slackCard(threadId, key);
       const current = view(saved);
+      const encoded = JSON.stringify(current);
+      if (saved?.view === encoded) return saved.ts;
       const message = render(current);
       let ts = saved?.ts;
       if (ts) await this.slack.chat.update({ channel: thread.channel, ts, ...message });
@@ -60,16 +69,24 @@ export class SlackAdapter {
         ts = result.ts;
         if (!ts) throw new Error('Slack returned no message timestamp');
       }
-      this.store.saveSlackCard({ threadId, key, ts, view: JSON.stringify(current) });
+      this.store.saveSlackCard({ threadId, key, ts, view: encoded });
       return ts;
     });
   }
   status(view: StatusView): Promise<string> {
     return this.publish(view.threadId, 'status', saved => {
       const previous: StatusView | undefined = saved && JSON.parse(saved.view);
-      const sameWork = previous?.state === view.state &&
-        JSON.stringify(previous.worktrees.map(tree => tree.id)) === JSON.stringify(view.worktrees.map(tree => tree.id));
-      return { ...view, acted: view.acted ?? (sameWork ? previous?.acted : undefined) };
+      const sameWork = previous && workKey(previous) === workKey(view);
+      const switchedBy = this.store.slackAction(view.threadId, operationKey('status', 'switch-repository', workKey(view)));
+      const cleanedBy = this.store.slackAction(view.threadId, operationKey('status', 'cleanup', workKey(view)));
+      let acted = view.acted;
+      if (switchedBy) acted = { actionId: 'switch-repository', user: switchedBy };
+      else if (sameWork && previous?.acted?.actionId === 'switch-repository') acted = previous.acted;
+      if (['awaiting-verification', 'cleaned'].includes(view.state)) {
+        if (cleanedBy) acted = { actionId: 'cleanup', user: cleanedBy };
+        else if (previous?.acted?.actionId === 'cleanup' && (sameWork || view.state === 'cleaned')) acted = previous.acted;
+      } else if (acted?.actionId === 'cleanup') acted = undefined;
+      return { ...view, acted };
     }, renderStatus);
   }
   decision(view: DecisionView): Promise<string> {
@@ -90,11 +107,12 @@ export class SlackAdapter {
     const owner = this.store.thread(view.threadId)?.owner;
     if (!owner) return Promise.reject(new Error('Unknown Slack thread'));
     return this.publish(view.threadId, `result:${view.id}`, saved => ({ ...view, owner,
-      retriedBy: saved ? (JSON.parse(saved.view) as ResultView).retriedBy ?? view.retriedBy : view.retriedBy }), renderResult);
+      retriedBy: this.store.slackAction(view.threadId, operationKey(`result:${view.id}`, 'retry')) ??
+        (saved ? (JSON.parse(saved.view) as ResultView).retriedBy : undefined) ?? view.retriedBy }), renderResult);
   }
-  private async refresh(threadId: string, acted?: StatusView['acted']): Promise<void> {
+  private async refresh(threadId: string): Promise<void> {
     const view = await this.options.statusView(threadId);
-    if (view) await this.status({ ...view, acted });
+    if (view) await this.status(view);
   }
   private async react(event: SlackEvent, name: 'eyes' | 'white_check_mark'): Promise<void> {
     try { await this.slack.reactions.add({ channel: event.channel, timestamp: event.ts, name }); }
@@ -106,14 +124,30 @@ export class SlackAdapter {
     try { await this.bridge.event(event); }
     finally {
       const thread = this.store.findThread(event.channel, event.threadTs ?? event.ts);
-      const saved = thread && this.store.inbound(thread.id).find(message => message.installationId === event.installationId && message.ts === event.ts);
-      if (saved && saved.kind !== 'archive' && !event.botMessage && event.user !== this.options.botId &&
-          this.options.allowedUsers.includes(event.user)) {
-        await this.react(event, 'eyes');
-        if (saved.kind === 'prompt' && saved.state === 'forwarded') await this.react(event, 'white_check_mark');
-        await this.refresh(thread!.id);
+      if (thread && !event.botMessage && event.user !== this.options.botId && this.options.allowedUsers.includes(event.user)) {
+        await this.deliver(thread.id);
       }
     }
+  }
+  async replay(threadId?: string): Promise<void> {
+    try { await this.bridge.replay(threadId); }
+    finally { await this.deliver(threadId); }
+  }
+  private async deliver(threadId?: string): Promise<void> {
+    const threads = new Set(this.store.inbound(threadId).filter(message => message.kind !== 'archive').map(message => message.threadId));
+    await Promise.all([...threads].map(id => this.serial(`delivery:${id}`, async () => {
+      for (const message of this.store.inbound(id)) {
+        if (message.kind === 'archive') continue;
+        const names: ('eyes' | 'white_check_mark')[] = ['eyes'];
+        if (message.kind === 'prompt' && message.state === 'forwarded') names.push('white_check_mark');
+        for (const name of names) {
+          if (this.store.hasSlackReaction(message.key, name)) continue;
+          await this.react(message, name);
+          this.store.saveSlackReaction(message.key, name);
+        }
+      }
+      await this.refresh(id);
+    })));
   }
   async action(click: Click): Promise<void> {
     let value: Record<string, unknown>;
@@ -138,16 +172,17 @@ export class SlackAdapter {
         const saved = this.store.slackCard(threadId, key);
         if (!saved || saved.ts !== click.messageTs) return;
         const result: ResultView = JSON.parse(saved.view);
-        if (result.outcome !== 'failed' || result.retriedBy) return;
+        if (result.outcome !== 'failed' || (click.actionId === 'retry' && result.retriedBy)) return;
         action = click.actionId === 'log-tail' ? { ...base, actionId: 'log-tail', triggerId: click.triggerId }
-          : { ...base, actionId: 'retry' };
+          : { ...base, actionId: 'retry', operationKey: operationKey(key, 'retry') };
       } else if (click.actionId === 'stop' || click.actionId === 'cleanup' || click.actionId === 'switch-repository') {
         key = 'status';
-        const view = await this.options.statusView(threadId);
-        if (!view || !statusActions(view).includes(click.actionId)) return;
         const displayed = this.store.slackCard(threadId, key);
         if (!displayed || !statusActions(JSON.parse(displayed.view)).includes(click.actionId)) return;
-        action = { ...base, actionId: click.actionId };
+        const receiptKey = operationKey(key, click.actionId, workKey(JSON.parse(displayed.view)));
+        const view = await this.options.statusView(threadId);
+        if (!this.store.slackAction(threadId, receiptKey) && (!view || !statusActions(view).includes(click.actionId))) return;
+        action = { ...base, actionId: click.actionId, ...(click.actionId === 'stop' ? {} : { operationKey: receiptKey }) };
       } else return;
       const saved = this.store.slackCard(threadId, key);
       if (!saved || saved.ts !== click.messageTs) return;
@@ -157,15 +192,8 @@ export class SlackAdapter {
         if (decision.answer !== undefined) await this.decision({ ...JSON.parse(saved.view), ...decision, owner: thread.owner });
       }
       if (!accepted) return;
-      if (action.actionId === 'retry') {
-        const result: ResultView = { ...JSON.parse(saved.view), retriedBy: click.user };
-        this.store.saveSlackCard({ ...saved, view: JSON.stringify(result) });
-        await this.result(result);
-      }
-      const acted = action.actionId === 'switch-repository' || action.actionId === 'cleanup'
-        ? { actionId: action.actionId, user: click.user } : undefined;
-      if (acted) this.store.saveSlackCard({ ...saved, view: JSON.stringify({ ...JSON.parse(saved.view), acted }) });
-      if (action.actionId !== 'log-tail') await this.refresh(threadId, acted);
+      if (action.actionId === 'retry') await this.result(JSON.parse(this.store.slackCard(threadId, key)!.view));
+      if (action.actionId !== 'log-tail') await this.refresh(threadId);
     });
   }
 }

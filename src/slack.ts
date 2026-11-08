@@ -3,7 +3,7 @@ import type { Orca } from './orca.js';
 import { Store, type SlackEvent } from './store.js';
 
 export type { SlackEvent } from './store.js';
-export type Action = { threadId: string; channel: string; user: string } & (
+export type Action = { threadId: string; channel: string; user: string; operationKey?: string } & (
   { actionId: 'decision'; decisionId: string; option: string } |
   { actionId: 'log-tail'; triggerId: string } |
   { actionId: 'retry' | 'cleanup' | 'switch-repository' | 'stop' }

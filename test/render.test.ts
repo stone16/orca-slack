@@ -127,3 +127,47 @@ test('rendering escapes Slack control characters and rejects unsafe link schemes
   expect(JSON.stringify(post.blocks)).toContain('&lt;!channel&gt;');
   expect(() => renderStatus({ ...view, linear: { label: 'ENG-12', url: 'javascript:alert(1)' } })).toThrow('Invalid link');
 });
+
+test.each(['&', '<', '>', '😀'])('long text keeps %s intact at section boundaries', character => {
+  const body = `${'x'.repeat(2997)}${character}tail`;
+  const post = renderResult({ threadId: 'thread', id: 'result', outcome: 'succeeded', text: body, owner: 'U1' });
+  const sections = post.blocks.flatMap(block => block.type === 'section' ? [block.text.text] : []);
+  for (const text of sections) {
+    expect(text.length).toBeLessThanOrEqual(3000);
+    expect(text).not.toMatch(/&(a|am|amp|l|lt|g|gt)?$/);
+    expect(text).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u);
+  }
+  expect(sections.join('')).toBe(`✅ ${body.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}`);
+});
+
+test('status links remain whole when a worktree row crosses the section boundary', () => {
+  const post = renderStatus({ ...view, worktrees: [{ ...view.worktrees[0], repository: 'x'.repeat(2970),
+    pullRequest: { number: 12, url: 'https://github.com/example/web/pull/12', state: 'open' } }] });
+  const sections = post.blocks.flatMap(block => block.type === 'section' ? [block.text.text] : []);
+  expect(sections.filter(text => text.includes('<https://github.com/example/web/pull/12|PR #12>'))).toHaveLength(1);
+  for (const text of sections) expect(text).not.toMatch(/<[^>]*$/);
+});
+
+test.each(['result', 'decision'] as const)('oversized %s text is truncated within Slack limits and keeps its buttons', kind => {
+  const text = 'A'.repeat(160000);
+  const post = kind === 'result'
+    ? renderResult({ threadId: 'thread', id: 'failure', outcome: 'failed', text, owner: 'U1' })
+    : renderDecision({ threadId: 'thread', id: 'question', owner: 'U1', question: text, options: ['Continue', 'Pause'] });
+  expect(post.blocks.length).toBeLessThanOrEqual(50);
+  expect(post.text.length).toBeLessThanOrEqual(4000);
+  expect(post.text.endsWith('…')).toBe(true);
+  expect(buttons(post).map(button => button.action_id)).toEqual(kind === 'result' ? ['retry', 'log-tail'] : ['decision_0', 'decision_1']);
+  for (const block of post.blocks) if (block.type === 'section') expect(block.text.text.length).toBeLessThanOrEqual(3000);
+});
+
+test('notification fallback truncates outside entities and Unicode pairs', () => {
+  const post = renderResult({ threadId: 'thread', id: 'result', outcome: 'succeeded', owner: 'U1',
+    text: `${'x'.repeat(3996)}😀<&tail` });
+  expect(post.text.length).toBeLessThanOrEqual(4000);
+  expect(post.text).not.toMatch(/[\uD800-\uDBFF]…$/u);
+});
+
+test('button values retain their Slack length guard', () => {
+  expect(() => renderDecision({ threadId: 'thread', id: 'question', owner: 'U1', question: 'Choose',
+    options: ['A'.repeat(2100)] })).toThrow('Button value exceeds Slack limit');
+});

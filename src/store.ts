@@ -109,6 +109,12 @@ export class Store {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS slack_cards (
         threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, ts TEXT NOT NULL, view TEXT NOT NULL,
+        PRIMARY KEY(threadId, key));
+      CREATE TABLE IF NOT EXISTS slack_reactions (
+        inboundKey TEXT NOT NULL REFERENCES inbound(key), name TEXT NOT NULL,
+        PRIMARY KEY(inboundKey, name));
+      CREATE TABLE IF NOT EXISTS slack_actions (
+        threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, user TEXT NOT NULL,
         PRIMARY KEY(threadId, key));`);
   }
   private transaction<T>(work: () => T): T {
@@ -401,6 +407,18 @@ export class Store {
   }
   slackCard(threadId: string, key: string): SlackCard | undefined {
     return this.db.prepare('SELECT * FROM slack_cards WHERE threadId=? AND key=?').get(threadId, key) as SlackCard | undefined;
+  }
+  hasSlackReaction(inboundKey: string, name: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM slack_reactions WHERE inboundKey=? AND name=?').get(inboundKey, name);
+  }
+  saveSlackReaction(inboundKey: string, name: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO slack_reactions VALUES (?, ?)').run(inboundKey, name);
+  }
+  slackAction(threadId: string, key: string): string | undefined {
+    return this.db.prepare('SELECT user FROM slack_actions WHERE threadId=? AND key=?').get(threadId, key)?.user as string | undefined;
+  }
+  saveSlackAction(threadId: string, key: string, user: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO slack_actions VALUES (?, ?, ?)').run(threadId, key, user);
   }
   close(): void { this.db.close(); }
 }

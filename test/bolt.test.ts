@@ -84,8 +84,13 @@ test('recorded message and mention payloads retain dedup fields and bot or edite
       threadTs: '1700000000.000001', text: 'Keep one page', state: 'forwarded' },
   ]);
   expect(commands.map(args => args[args.indexOf('--body') + 1])).toEqual(['Export orders', 'Keep one page']);
-  expect(new Set(calls.filter(call => call.method === 'reaction').map(call => call.args.name)))
-    .toEqual(new Set(['eyes', 'white_check_mark']));
+  expect(calls.filter(call => call.method === 'reaction').map(call => [call.args.timestamp, call.args.name]))
+    .toEqual([
+      ['1700000000.000001', 'eyes'], ['1700000000.000001', 'white_check_mark'],
+      ['1700000001.000001', 'eyes'], ['1700000001.000001', 'white_check_mark'],
+    ]);
+  expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
 });
 
 test('status updates use the saved timestamp after reopening and concurrent first updates post once', async () => {
@@ -100,18 +105,42 @@ test('status updates use the saved timestamp after reopening and concurrent firs
   const restarted = new SlackAdapter(client, reopened, options);
   await restarted.status({ ...initial, state: 'unknown' });
   await restarted.status({ ...initial, state: 'interrupted' });
-  expect(calls.filter(call => call.method === 'update').map(call => call.args.ts)).toEqual(['10.0', '10.0', '10.0']);
+  expect(calls.filter(call => call.method === 'update').map(call => call.args.ts)).toEqual(['10.0', '10.0']);
   expect(calls.filter(call => call.method === 'reaction')).toEqual([]);
   expect(store.slackCard('thread', 'status')?.ts).toBe('10.0');
 });
 
-test('a received prompt gets no forwarded check mark until Orca delivery succeeds', async () => {
+test('a queued prompt gets one forwarded reaction after replacement lead replay', async () => {
   const { adapter, store, calls } = setup();
   store.endLead('session');
   await adapter.event({ installationId: 'A1:T1', eventId: 'Ev-queued', channel: 'C1', ts: '1700000005.000001',
     threadTs: '1700000000.000001', user: 'U1', text: 'Continue' });
   expect(calls.filter(call => call.method === 'reaction').map(call => call.args.name)).toEqual(['eyes']);
   expect(store.inbound('thread')[0].state).toBe('pending');
+  store.replaceLead({ id: 'replacement', threadId: 'thread', worktreeId: 'tree', runId: 'run',
+    taskId: 'replacement-task', dispatchId: 'replacement-dispatch', handle: 'replacement-handle' });
+  await adapter.replay('thread');
+  await adapter.replay('thread');
+  expect(calls.filter(call => call.method === 'reaction').map(call => [call.args.timestamp, call.args.name]))
+    .toEqual([['1700000005.000001', 'eyes'], ['1700000005.000001', 'white_check_mark']]);
+  expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
+});
+
+test('later messages signal delivery for older queued prompts exactly once', async () => {
+  const { adapter, store, calls, commands } = setup();
+  store.endLead('session');
+  const queued = { installationId: 'A1:T1', eventId: 'Ev-queued', channel: 'C1', ts: '5',
+    threadTs: '1700000000.000001', user: 'U1', text: 'First prompt' };
+  await adapter.event(queued);
+  store.replaceLead({ id: 'replacement', threadId: 'thread', worktreeId: 'tree', runId: 'run',
+    taskId: 'replacement-task', dispatchId: 'replacement-dispatch', handle: 'replacement-handle' });
+  await adapter.event({ ...queued, eventId: 'Ev-next', ts: '6', text: 'Second prompt' });
+  expect(commands).toHaveLength(2);
+  expect(calls.filter(call => call.method === 'reaction').map(call => [call.args.timestamp, call.args.name]))
+    .toEqual([['5', 'eyes'], ['5', 'white_check_mark'], ['6', 'eyes'], ['6', 'white_check_mark']]);
+  expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
 });
 
 test('decision button acknowledges then replies through Bridge once and updates the decision in place', async () => {
@@ -124,7 +153,7 @@ test('decision button acknowledges then replies through Bridge once and updates 
   expect(commands).toEqual([['orchestration', 'reply', '--id', 'question', '--body', 'Continue', '--run', 'run', '--json', '--full']]);
   expect(store.decision('question')?.answeredBy).toBe('U1');
   const updates = calls.filter(call => call.method === 'update' && call.args.ts === '10.0');
-  expect(updates.length).toBeGreaterThan(0);
+  expect(updates).toHaveLength(1);
   expect(JSON.stringify(updates.at(-1)?.args.blocks)).toContain('已选择 Continue');
   expect(JSON.stringify(updates.at(-1)?.args.blocks)).not.toContain('"type":"button"');
 });
@@ -150,6 +179,7 @@ test('a refusal reaches only the refused user and log tail opens a plain text mo
       ] },
   } }]);
   expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
 });
 
 test('status and failure buttons reach Bridge actions and stale message timestamps cannot act', async () => {
@@ -171,6 +201,7 @@ test('status and failure buttons reach Bridge actions and stale message timestam
   await deliver(click('retry', { threadId: 'thread', resultId: 'failure' }, '11.0'));
   expect(ownerActions).toEqual(['switch-repository', 'retry']);
   expect(JSON.stringify(calls.filter(call => call.method === 'update' && call.args.ts === '11.0'))).toContain('已重试');
+  expect(calls.filter(call => call.method === 'update').map(call => call.args.ts)).toEqual(['10.0', '10.0', '11.0']);
 });
 
 test('tokens are required from the environment and library logs redact both tokens', () => {
@@ -194,6 +225,7 @@ test('simultaneous decision publication saves one decision and one Slack message
   const decision = { threadId: 'thread', id: 'question', owner: 'U1', question: 'Continue?', options: ['Continue'] };
   await Promise.all([adapter.decision(decision), adapter.decision(decision)]);
   expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
   expect(store.decision('question')?.slackTs).toBe('10.0');
 });
 
@@ -211,7 +243,7 @@ test('a failed update retries the original card without posting another message'
 });
 
 test('cleanup clicks use the current state and reach the owner handler only when eligible', async () => {
-  const { adapter, changeView, deliver, ownerActions } = setup();
+  const { adapter, changeView, deliver, ownerActions, calls } = setup();
   const view: StatusView = { ...initial, state: 'awaiting-verification', worktrees: [{ ...initial.worktrees[0],
     agentActive: false, pullRequest: { number: 1, url: 'https://github.com/example/web/pull/1', state: 'merged' } }] };
   await adapter.status(view);
@@ -223,10 +255,11 @@ test('cleanup clicks use the current state and reach the owner handler only when
   await deliver(click('cleanup', { threadId: 'thread' }, '10.0'));
   await deliver(click('cleanup', { threadId: 'thread' }, '10.0'));
   expect(ownerActions).toEqual(['cleanup']);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(1);
 });
 
-test('a failed Orca forward keeps a durable prompt and only the received reaction', async () => {
-  const { client, store, options, calls } = setup();
+test('a failed Orca forward gains its delivery reaction on replay', async () => {
+  const { client, store, options, calls, commands } = setup();
   const adapter = new SlackAdapter(client, store, { ...options, orca: new CliOrca(async () => {
     return { stdout: '{"ok":false,"error":{"message":"Orca unavailable"}}' };
   }) });
@@ -234,6 +267,11 @@ test('a failed Orca forward keeps a durable prompt and only the received reactio
     threadTs: '1700000000.000001', user: 'U1', text: 'Continue' })).rejects.toThrow('Orca unavailable');
   expect(store.inbound('thread')[0].state).toBe('pending');
   expect(calls.filter(call => call.method === 'reaction').map(call => call.args.name)).toEqual(['eyes']);
+  await new SlackAdapter(client, store, options).replay();
+  expect(calls.filter(call => call.method === 'reaction').map(call => call.args.name)).toEqual(['eyes', 'white_check_mark']);
+  expect(commands).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
 });
 
 test('malformed and cross-channel button values cannot reach Orca, owner actions, or log modals', async () => {
@@ -252,10 +290,11 @@ test('malformed and cross-channel button values cannot reach Orca, owner actions
   expect(commands).toEqual([]);
   expect(ownerActions).toEqual([]);
   expect(calls.filter(call => call.method === 'modal')).toEqual([]);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
 });
 
 test('the Socket Mode receiver carries recorded envelopes to the real Bridge and redacts listener errors', async () => {
-  const { store, options, client, commands, calls } = setup();
+  const { store, options, client, commands, calls, changeView } = setup();
   vi.stubEnv('SLACK_BOT_TOKEN', 'fixture-bot-secret');
   vi.stubEnv('SLACK_APP_TOKEN', 'fixture-app-secret');
   const logs: string[] = [];
@@ -272,9 +311,192 @@ test('the Socket Mode receiver carries recorded envelopes to the real Bridge and
   expect(commands).toHaveLength(1);
   expect(store.inbound('thread')[0].eventId).toBe('Ev-message');
   expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
-  runtime.app.client.chat.update = async () => { throw new Error(`Remote failure ${process.env.SLACK_BOT_TOKEN} ${process.env.SLACK_APP_TOKEN}`); };
+  changeView({ ...initial, state: 'unknown' });
+  let updateAttempts = 0;
+  runtime.app.client.chat.update = async () => {
+    updateAttempts++;
+    throw new Error(`Remote failure ${process.env.SLACK_BOT_TOKEN} ${process.env.SLACK_APP_TOKEN}`);
+  };
   await listeners[0]({ body: events[2], ack: async () => {} });
+  expect(updateAttempts).toBe(1);
+  expect(calls.filter(call => call.method === 'reaction').map(call => call.args.name))
+    .toEqual(['eyes', 'white_check_mark', 'eyes', 'white_check_mark']);
   expect(logs.join(' ')).toContain('[redacted]');
   expect(logs.join(' ')).not.toContain('fixture-bot-secret');
   expect(logs.join(' ')).not.toContain('fixture-app-secret');
+});
+
+test.each(['retry', 'switch-repository', 'cleanup'] as const)(
+  '%s keeps the displayed view after a failed update and retries the update without repeating the owner action', async actionId => {
+    const root = mkdtempSync(join(tmpdir(), 'slack-action-'));
+    roots.push(root);
+    const file = join(root, 'ledger.sqlite');
+    const { adapter, store, options, client, calls, ownerActions, changeView } = setup(file);
+    const cleanup: StatusView = { ...initial, state: 'awaiting-verification', worktrees: [{ ...initial.worktrees[0],
+      agentActive: false, pullRequest: { number: 1, url: 'https://github.com/example/web/pull/1', state: 'merged' } }] };
+    if (actionId === 'retry') await adapter.result({ threadId: 'thread', id: 'failure', owner: 'U1', outcome: 'failed', text: 'Checks failed' });
+    else {
+      const view = actionId === 'cleanup' ? cleanup : initial;
+      changeView(view);
+      await adapter.status(view);
+    }
+    const key = actionId === 'retry' ? 'result:failure' : 'status';
+    const before = store.slackCard('thread', key)!;
+    const update = client.chat.update;
+    let attempts = 0;
+    client.chat.update = async () => { attempts++; throw new Error('Slack unavailable'); };
+    const clicked = { actionId, value: JSON.stringify({ threadId: 'thread', resultId: 'failure' }),
+      channel: 'C1', user: 'U1', messageTs: '10.0', triggerId: 'fixture-trigger' };
+    await expect(adapter.action(clicked)).rejects.toThrow('Slack unavailable');
+    expect(attempts).toBe(1);
+    expect(store.slackCard('thread', key)).toEqual(before);
+    expect(ownerActions).toEqual([actionId]);
+    await adapter.action({ ...clicked, user: 'U2' });
+    expect(calls.filter(call => call.method === 'ephemeral').map(call => call.args.user)).toEqual(['U2']);
+    expect(attempts).toBe(1);
+    client.chat.update = update;
+    const reopened = new Store(file);
+    stores.push(reopened);
+    const restarted = new SlackAdapter(client, reopened, options);
+    await restarted.action(clicked);
+    await restarted.action(clicked);
+    expect(ownerActions).toEqual([actionId]);
+    expect(store.slackCard('thread', key)?.view).not.toBe(before.view);
+    expect(calls.filter(call => call.method === 'update').map(call => call.args.ts)).toEqual(['10.0']);
+  });
+
+test('a completed action waits for a missing status view without changing the displayed card', async () => {
+  const { adapter, client, store, options, calls, ownerActions } = setup();
+  let available = true;
+  const waiting = new SlackAdapter(client, store, { ...options, statusView: async () => available ? initial : undefined,
+    ownerAction: async action => { await options.ownerAction(action); available = false; } });
+  await adapter.status(initial);
+  const before = store.slackCard('thread', 'status');
+  const clicked = { actionId: 'switch-repository', value: JSON.stringify({ threadId: 'thread' }), channel: 'C1',
+    user: 'U1', messageTs: '10.0', triggerId: 'fixture-trigger' };
+  await waiting.action(clicked);
+  expect(store.slackCard('thread', 'status')).toEqual(before);
+  await waiting.action(clicked);
+  available = true;
+  await waiting.action(clicked);
+  expect(ownerActions).toEqual(['switch-repository']);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(1);
+});
+
+test('retry keeps the read-only log-tail button and modal available', async () => {
+  const { adapter, deliver, calls, ownerActions } = setup();
+  await adapter.result({ threadId: 'thread', id: 'failure', owner: 'U1', outcome: 'failed', text: 'Checks failed' });
+  await deliver(click('retry', { threadId: 'thread', resultId: 'failure' }, '10.0'));
+  const update = calls.filter(call => call.method === 'update' && call.args.ts === '10.0');
+  expect(update).toHaveLength(1);
+  expect(JSON.stringify(update[0].args.blocks)).toContain('log-tail');
+  await deliver(click('log-tail', { threadId: 'thread', resultId: 'failure' }, '10.0'));
+  expect(calls.filter(call => call.method === 'modal')).toHaveLength(1);
+  expect(ownerActions).toEqual(['retry']);
+});
+
+test('a repository-switch receipt survives state changes on the same worktree', async () => {
+  const { adapter, changeView, deliver, store, ownerActions, calls } = setup();
+  await adapter.status(initial);
+  await deliver(click('switch-repository', { threadId: 'thread' }, '10.0'));
+  for (const state of ['waiting', 'discussing', 'implementing'] as const) {
+    const view = { ...initial, state };
+    changeView(view);
+    await adapter.status(view);
+    expect(JSON.parse(store.slackCard('thread', 'status')!.view).acted)
+      .toEqual({ actionId: 'switch-repository', user: 'U1' });
+  }
+  await deliver(click('switch-repository', { threadId: 'thread' }, '10.0'));
+  expect(ownerActions).toEqual(['switch-repository']);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(4);
+});
+
+test('an owner callback can publish a new worktree without a stale action overwriting its card', async () => {
+  const { client, store, options, calls, changeView } = setup();
+  const replacement: StatusView = { ...initial, title: 'Replacement work', state: 'discussing',
+    worktrees: [{ ...initial.worktrees[0], id: 'replacement', repository: 'example/api', branch: 'feat/new-export' }] };
+  let adapter: SlackAdapter;
+  adapter = new SlackAdapter(client, store, { ...options, ownerAction: async () => {
+    changeView(replacement);
+    await adapter.status(replacement);
+  } });
+  await adapter.status(initial);
+  await adapter.action({ actionId: 'switch-repository', value: JSON.stringify({ threadId: 'thread' }), channel: 'C1',
+    user: 'U1', messageTs: '10.0', triggerId: 'fixture-trigger' });
+  const displayed = JSON.parse(store.slackCard('thread', 'status')!.view);
+  expect(displayed).toMatchObject(replacement);
+  expect(displayed.acted).toBeUndefined();
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(1);
+});
+
+test('new root prompts signal delivery when their first lead becomes available', async () => {
+  const { client, store, options, calls, commands } = setup();
+  const adapter = new SlackAdapter(client, store, { ...options, statusView: async threadId => ({ ...initial, threadId }) });
+  await adapter.event({ installationId: 'A1:T1', eventId: 'Ev-new-root', channel: 'C1', ts: '20',
+    user: 'U1', text: '<@BOT> New work' });
+  const thread = store.findThread('C1', '20')!;
+  expect(commands).toHaveLength(0);
+  expect(store.inbound(thread.id)[0].state).toBe('pending');
+  store.saveWorktree({ id: 'new-tree', threadId: thread.id, repository: 'example/web', branch: 'feat/new' });
+  store.replaceLead({ id: 'new-session', threadId: thread.id, worktreeId: 'new-tree', runId: 'run',
+    taskId: 'new-task', dispatchId: 'new-dispatch', handle: 'new-handle' });
+  await adapter.replay();
+  await adapter.replay();
+  expect(commands).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'reaction').map(call => [call.args.timestamp, call.args.name]))
+    .toEqual([['20', 'eyes'], ['20', 'white_check_mark']]);
+  expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
+});
+
+test('reaction receipts suppress concurrent duplicates and survive reopening', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'slack-reaction-'));
+  roots.push(root);
+  const file = join(root, 'ledger.sqlite');
+  const { adapter, options, client, calls, commands } = setup(file);
+  const event = { installationId: 'A1:T1', eventId: 'Ev-concurrent', channel: 'C1', ts: '5',
+    threadTs: '1700000000.000001', user: 'U1', text: 'Continue' };
+  await Promise.all([adapter.event(event), adapter.event({ ...event, eventId: 'Ev-mention-copy' })]);
+  const reopened = new Store(file);
+  stores.push(reopened);
+  await new SlackAdapter(client, reopened, options).replay();
+  expect(commands).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'reaction').map(call => [call.args.timestamp, call.args.name]))
+    .toEqual([['5', 'eyes'], ['5', 'white_check_mark']]);
+  expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
+});
+
+test('a failed delivery reaction is retried without forwarding the prompt twice', async () => {
+  const { adapter, client, calls, commands } = setup();
+  const add = client.reactions.add;
+  const attempts: string[] = [];
+  let failed = false;
+  client.reactions.add = async args => {
+    attempts.push(args.name);
+    if (args.name === 'white_check_mark' && !failed) { failed = true; throw new Error('Slack unavailable'); }
+    return add(args);
+  };
+  await expect(adapter.event({ installationId: 'A1:T1', eventId: 'Ev-reaction-fail', channel: 'C1', ts: '5',
+    threadTs: '1700000000.000001', user: 'U1', text: 'Continue' })).rejects.toThrow('Slack unavailable');
+  await adapter.replay();
+  await adapter.replay();
+  expect(attempts).toEqual(['eyes', 'white_check_mark', 'white_check_mark']);
+  expect(commands).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'post')).toHaveLength(1);
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(0);
+});
+
+test('cleanup feedback survives cleaned state and clears for a later worktree', async () => {
+  const { adapter, changeView, deliver, store, calls } = setup();
+  const cleanup: StatusView = { ...initial, state: 'awaiting-verification', worktrees: [{ ...initial.worktrees[0],
+    agentActive: false, pullRequest: { number: 1, url: 'https://github.com/example/web/pull/1', state: 'merged' } }] };
+  changeView(cleanup);
+  await adapter.status(cleanup);
+  await deliver(click('cleanup', { threadId: 'thread' }, '10.0'));
+  await adapter.status({ ...cleanup, state: 'cleaned', worktrees: [] });
+  expect(JSON.parse(store.slackCard('thread', 'status')!.view).acted).toEqual({ actionId: 'cleanup', user: 'U1' });
+  await adapter.status({ ...initial, worktrees: [{ ...initial.worktrees[0], id: 'later-work' }] });
+  expect(JSON.parse(store.slackCard('thread', 'status')!.view).acted).toBeUndefined();
+  expect(calls.filter(call => call.method === 'update')).toHaveLength(3);
 });

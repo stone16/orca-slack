@@ -41,6 +41,7 @@ The [Slack adapter guide](docs/slack.md) describes rendering, saved card timesta
 
 Use one [ReportLoop](src/report-loop.ts#L7) per Orca Run and one Bridge instance per Slack app.
 At startup, call `ReportLoop.recover()` and `Bridge.replay()` before scheduling `ReportLoop.poll()`.
+With the Slack adapter, use `adapter.replay()` so queued prompts also receive delivery reactions.
 The report sender receives a durable report and resolves after the downstream send succeeds.
 A crash after send and before its sent marker can repeat that report on recovery.
 A known inbox coverage gap stays recorded in `Store.coverage(runId)`.
