@@ -128,7 +128,6 @@ test('Git or Orca inspection failures retain the worktree and do not fabricate a
 
 test('confirmed cleanup durably saves the receipt, PR link, final commit, and session report before deletion', async () => {
   const f = fixture();
-  await new PrPoller(f.store, f.run).poll();
   f.store.replaceLead({ id: 'session', threadId: 'thread', worktreeId: f.tree.id,
     runId: 'run', taskId: 'task', dispatchId: 'dispatch', handle: 'handle' });
   f.store.endLead('session');
@@ -386,4 +385,32 @@ test('remaining worktrees stay cleanable after a sibling is deleted while its PR
   expect(await cleanup.confirm(secondTree.id, 'U1')).toMatchObject({ status: 'deleted' });
   expect(first.store.pullRequests('thread')).toHaveLength(2);
   expect(first.store.cleanupReceipts('thread').map(receipt => receipt.state)).toEqual(['deleted', 'deleted']);
+});
+
+test.each(['unseen', 'open'])('cleanup persists a PR merged between polls before deleting it (previously %s)', async previous => {
+  const f = fixture();
+  if (previous === 'open') {
+    f.state.prs = [{ ...pr, state: 'OPEN' }];
+    await new PrPoller(f.store, f.run).poll();
+  }
+  f.state.prs = [pr];
+  let beforeDelete: unknown;
+  const run: RunCommand = async (program, args) => {
+    if (program === 'orca' && args[1] === 'rm') {
+      const reopened = new Store(f.file);
+      try { beforeDelete = { links: reopened.pullRequests('thread'), observed: reopened.observedPullRequests('thread') }; }
+      finally { reopened.close(); }
+    }
+    return f.run(program, args);
+  };
+  expect(await new Cleanup(f.store, run).confirm(f.tree.id, 'U1')).toMatchObject({ status: 'deleted' });
+  const links = [{ id: pr.url, worktreeId: f.tree.id, url: pr.url }];
+  const observed = [{ ...pr, id: pr.url, worktreeId: f.tree.id }];
+  expect(beforeDelete).toEqual({ links, observed });
+  const reopened = new Store(f.file);
+  try {
+    expect(reopened.pullRequests('thread')).toEqual(links);
+    expect(reopened.observedPullRequests('thread')).toEqual(observed);
+    expect(reopened.trackedWorktrees('thread')).toEqual([]);
+  } finally { reopened.close(); }
 });
