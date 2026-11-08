@@ -50,11 +50,13 @@ A known inbox coverage gap stays recorded in `Store.coverage(runId)`.
 `poll()` returns changed PRs and per-worktree failures; unchanged PRs produce no update.
 `start(onChange, onFailure)` schedules a poll every 60 seconds, skips overlapping timer ticks, and returns a function that stops future ticks.
 Keep the callbacks synchronous and call `poll()` directly for startup reconciliation.
+Callback exceptions do not stop later updates or polling ticks; change-callback errors are reported through `onFailure`.
 Malformed responses, truncated results, and command failures preserve the last known state and retry on the next poll.
 
 Use one [Cleanup](src/cleanup.ts#L20) instance per Bridge.
-`check(worktreeId)` refreshes GitHub and checks the thread's PRs and agents before inspecting the target worktree with Git.
-It refuses unknown activity, unmerged PRs, the main checkout, changed branches, dirty files including ignored files, stashes, and a HEAD different from the merged PR head.
+`check(worktreeId)` reads a fresh GitHub snapshot without consuming the periodic poller's changes, then checks the thread's PRs and agents before inspecting the target worktree with Git.
+It refuses missing PRs, unknown activity, unmerged PRs, the main checkout, changed branches, dirty files including ignored files, stashes, and a HEAD different from the target's latest merged PR head.
+The latest PR is the one with the highest PR number.
 It compares `headRefOid`, so squash merges pass.
 
 After an explicit owner confirmation, call `confirm(worktreeId, ownerId)` through the existing Bridge owner-action handler.
@@ -74,7 +76,6 @@ node scripts/cleanup-integration.mjs
 
 The driver uses real Git and scripted GitHub and Orca boundaries.
 It exercises dirty files, a stash, a running-agent response, a changed HEAD, and a real squash merge, then removes its temporary repositories.
-The [verification report](docs/verification/2026-11-08-pr-cleanup.md) records the acceptance evidence and the additional disposable live-Orca check.
 
 ## Check the real Orca boundary
 
