@@ -30,19 +30,19 @@ export class Leads {
   }
   forward(threadId: string): Promise<void> { return this.serial(threadId, () => this.forwardPending(threadId)); }
   private async forwardPending(threadId: string): Promise<void> {
-    for (const message of this.store.inbound(threadId)) {
-      if (message.kind === 'prompt' && message.state === 'pending' && !this.text(message.text)) this.store.archiveInbound(message.key);
-    }
-    const pending = this.store.inbound(threadId).filter(message => message.kind === 'prompt' && message.state === 'pending');
-    if (!pending.length) return;
+    const candidates = this.store.inbound(threadId).filter(message => message.kind === 'prompt' && message.state === 'pending');
+    if (!candidates.length) return;
     let sample = this.store.routingSamples(threadId)[0];
     if (!sample) {
-      sample = classify(threadId, pending[0].text, this.config.repositories);
+      sample = classify(threadId, candidates[0].text, this.config.repositories);
       this.store.saveRoutingSample(sample);
       this.store.recordLeadEvent({ threadId, key: 'routing', kind: sample.repository ? 'routed' : 'repository-required',
         text: JSON.stringify(sample) });
     }
     if (!sample.repository) return;
+    for (const message of candidates) if (!this.text(message.text)) this.store.archiveInbound(message.key);
+    const pending = candidates.filter(message => this.text(message.text));
+    if (!pending.length) return;
     const lead = this.store.leadSessions(threadId).find(session => session.active);
     if (lead) {
       if (this.state(lead) === 'interrupted') return;

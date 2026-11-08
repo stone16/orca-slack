@@ -279,17 +279,12 @@ export class Store {
       WHERE d.threadId=? AND d.answer IS NULL AND e.kind='waiting' ORDER BY e.rowid`).all(threadId)
       .map(row => this.decision(row.id as string)!);
   }
-  answerLeadDecision(id: string, answer: string, user: string): boolean {
-    const decision = this.decision(id);
-    if (!decision || (decision.options.length > 0 && !decision.options.includes(answer))) return false;
-    return this.db.prepare('UPDATE decisions SET answer=?, answeredBy=? WHERE id=? AND answer IS NULL')
-      .run(answer, user, id).changes === 1;
-  }
   archiveInbound(key: string): void {
     this.db.prepare("UPDATE inbound SET state='archived' WHERE key=? AND state='pending'").run(key);
   }
   completeLeadLaunch(session: Omit<LeadSession, 'active'>, messageKeys: readonly string[]): void {
     this.transaction(() => {
+      this.db.prepare('UPDATE lead_sessions SET active=0 WHERE threadId=?').run(session.threadId);
       this.db.prepare('INSERT INTO lead_sessions VALUES (?, ?, ?, ?, ?, ?, ?, 1)')
         .run(session.id, session.threadId, session.worktreeId, session.runId,
           session.taskId, session.dispatchId, session.handle);

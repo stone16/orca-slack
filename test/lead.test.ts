@@ -23,12 +23,19 @@ function setup(file = ':memory:') {
   let failure: string | undefined;
   let changeSource = false;
   let partialLaunch = false;
+  let blocked: { verb: string; entered: () => void; wait: Promise<void> } | undefined;
   let state = { projection: { liveness: { verdict: 'live', source: 'agent_status' }, attention: { categories: [] as string[], requiresAction: false } }, observation: { status: 'live', exactWorker: true, agentWait: null as unknown } };
   let read = { source: 'transcript', cursor: 'w1' };
   let terminal = { status: 'running', source: 'stream', nextCursor: 't1' };
   const reports: Report[] = [];
   const orca = new LeadCli(async args => {
     commands.push(args);
+    if (blocked?.verb === args[1]) {
+      const current = blocked;
+      blocked = undefined;
+      current.entered();
+      await current.wait;
+    }
     if (args[1] === 'worker-read' && changeSource) {
       changeSource = false;
       return { stdout: '{"ok":false,"error":{"code":"source_changed","message":"Cursor source differs"}}' };
@@ -47,6 +54,13 @@ function setup(file = ':memory:') {
   const leads = new Leads(orca, store, { runId: 'run', repositories, botId: 'BOT', agent: 'codex' });
   const bridge = new Bridge(orca, slack, store, ['owner', 'peer'], 'BOT', undefined, leads);
   return { store, orca, leads, bridge, commands, reports,
+    block: (verb: string) => {
+      let entered!: () => void, release!: () => void;
+      const ready = new Promise<void>(resolve => { entered = resolve; });
+      const wait = new Promise<void>(resolve => { release = resolve; });
+      blocked = { verb, entered, wait };
+      return { ready, release };
+    },
     partialLaunch: () => { partialLaunch = true; },
     sourceChange: () => { changeSource = true; },
     noWaitEvidence: () => { state.observation.agentWait = undefined; },
@@ -487,4 +501,69 @@ test('B1 the measured full worker-show projection keeps a healthy lead running',
   await h.leads.poll();
   expect(calls(h.commands, 'worker-show')).toEqual([['orchestration', 'worker-show', '--dispatch', 'dispatch-1', '--json', '--full']]);
   expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('running');
+});
+
+test('R2 SF1 launch settlement replaces an interrupted session and scopes interruption to its old ID', async () => {
+  const h = setup();
+  await h.bridge.event(event);
+  h.terminal('exited');
+  await h.leads.poll();
+  await h.orca.call('worker-stop', ['--dispatch', 'dispatch-1']);
+  await h.orca.call('worker-start', ['--run', 'run', '--worktree', 'id:tree-1', '--agent', 'codex', '--spec', 'Authorized replacement']);
+  const session = { id: 'replacement', threadId, worktreeId: 'tree-1', runId: 'run',
+    taskId: 'task-2', dispatchId: 'dispatch-2', handle: 'handle-2' };
+  h.store.beginLeadLaunch(threadId, session.id);
+  h.store.saveLaunchDispatch(threadId, session.dispatchId);
+  expect(() => h.store.completeLeadLaunch(session, [])).not.toThrow();
+  expect(h.store.leadSessions(threadId).map(row => [row.dispatchId, row.active])).toEqual([['dispatch-1', false], ['dispatch-2', true]]);
+  expect(h.store.pendingLaunch(threadId)).toBeUndefined();
+  expect(h.store.leadEvents(threadId).some(event => event.kind === 'interrupted' && event.sessionId !== session.id)).toBe(true);
+  h.terminal('running');
+  await h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'follow-up', text: 'Continue in the replacement' });
+  await h.leads.poll();
+  expect(argument(calls(h.commands, 'send')[0], '--to')).toBe('dispatch:dispatch-2');
+  expect(h.store.leadEvents(threadId).at(-1)).toMatchObject({ sessionId: session.id, kind: 'running' });
+  h.store.beginLeadLaunch(threadId, 'rejected');
+  expect(() => h.store.completeLeadLaunch({ ...session, id: 'rejected', dispatchId: 'dispatch-3', worktreeId: 'missing-tree' }, [])).toThrow();
+  expect(h.store.leadSessions(threadId).map(row => [row.dispatchId, row.active])).toEqual([['dispatch-1', false], ['dispatch-2', true]]);
+  expect(h.store.pendingLaunch(threadId)).toBe('rejected');
+});
+
+test('R2 SF2 a bare-mention root receives one routing sample and a repository-required event', async () => {
+  const h = setup();
+  await h.bridge.event({ ...event, text: '<@BOT>' });
+  expect(h.store.routingSamples(threadId)).toEqual([{ threadId, text: '<@BOT>', repository: null, intent: 'clarify', rule: 'unknown-repository' }]);
+  expect(h.store.leadEvents(threadId).at(-1)?.kind).toBe('repository-required');
+  expect(h.store.inbound(threadId)[0].state).toBe('pending');
+  await h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'later' });
+  expect(h.store.routingSamples(threadId)).toHaveLength(1);
+  expect(calls(h.commands, 'worker-start')).toHaveLength(0);
+});
+
+test.each(['worker-stop', 'queued action'])('R2 SF3 button stop preserves prompts saved after the click during %s', async phase => {
+  const h = setup();
+  await h.bridge.event(event);
+  let stopping: Promise<boolean>;
+  let preceding: Promise<void> | undefined;
+  let gate;
+  if (phase === 'worker-stop') {
+    h.fail('send');
+    await expect(h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'before', text: 'Before the click' })).rejects.toThrow('uncertain command');
+    h.fail(undefined);
+    gate = h.block('worker-stop');
+    stopping = h.bridge.action({ actionId: 'stop', threadId, channel: 'channel', user: 'owner' });
+    await gate.ready;
+  } else {
+    gate = h.block('send');
+    preceding = h.bridge.event({ ...event, ts: '2', threadTs: '1', eventId: 'before', text: 'Before the click' });
+    await gate.ready;
+    stopping = h.bridge.action({ actionId: 'stop', threadId, channel: 'channel', user: 'owner' });
+  }
+  const following = h.bridge.event({ ...event, ts: '3', threadTs: '1', eventId: 'after', text: 'After the click' });
+  expect(h.store.inbound(threadId).at(-1)?.state).toBe('pending');
+  gate.release();
+  await Promise.all([preceding, stopping, following]);
+  expect(h.store.inbound(threadId).map(message => message.state)).toEqual(['forwarded', phase === 'worker-stop' ? 'archived' : 'forwarded', 'forwarded']);
+  expect(calls(h.commands, 'worker-start')).toHaveLength(2);
+  expect(argument(calls(h.commands, 'worker-start')[1], '--spec')).toContain('After the click');
 });
