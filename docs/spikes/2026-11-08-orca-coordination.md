@@ -13,7 +13,7 @@ The Bridge should own one Run, keep the Run/task/Dispatch/session/worktree ident
 | 3. Bridge-created child in second repository, same Run | Verified | Explicit lineage and child worker_done |
 | 4. Sequential sessions, keep-open, release | Verified | Distinct Dispatches/terminals; automatic close and retained terminal |
 | 5. Bridge-only lead and report to settled lead | Verified in this trial | Run-list comparison and new session acknowledgement |
-| 6. Detect agent exit without worker_done | Not verified | Killed agent; ready/dispatched persisted while projection became unverifiable |
+| 6. Detect agent exit without worker_done | Not verified for a killed agent; normal turn end detected | Section 6.1 measures reads/agentWait and a finished-without-report escalation |
 | 7. Cleanup | Verified | Before/after inventories and unchanged main checkout; inert audit history retained |
 | 8. Public-safe report | Verified | Redaction probe with no matches |
 
@@ -74,7 +74,7 @@ orca orchestration inbox --terminal "run:$RUN" --limit 100 --json --full
 # INSERT OR IGNORE by message id, including inbox rows already read.
 ```
 
-The harness stopped before the next step at each boundary. The sink was a local file: **no Slack message was sent**. Each case used its own SQLite database. Original pre-consume JSON-file probes were repeated with actual committed SQLite persistence; the following table is the stronger SQLite run. `P/C` are ids returned by peek and consume before the kill; `R` is the unread peek after recovery. A dash means that step had not run.
+The harness stopped before the next step at each boundary. The sink was a local file: **no Slack message was sent**. Each case used its own SQLite database. Original pre-consume JSON-file probes were repeated with actual committed SQLite persistence; the following table is the stronger SQLite run. `P/C` are ids returned by peek and consume before the kill; `R` is the unread peek after recovery. The “Inbox after kill” column shows only ids belonging to that row’s probe, extracted from the full inbox response; other retained messages are omitted. A dash means that step had not run.
 
 | Kill boundary | P | C | Durable ledger at kill | R | Inbox after kill |
 |---|---|---|---|---|---|
@@ -88,7 +88,7 @@ The harness stopped before the next step at each boundary. The sink was a local 
 
 Ledger tuples are `[message_id, sent]`; inbox tuples show actual `read` values. Every listed id remained recoverable in inbox. Before consumption it also remained unread. After consumption, a plain check could not recover it: startup reconciliation of **read** history is necessary. The final race row proves the dangerous window: the late id was consumed and absent from SQLite at the kill, but present in inbox with `read:1`; replay inserted it successfully.
 
-After local send but before the sent marker, the surviving ledger still had `sent:0`; after the marker it had `sent:1`. A replaying outbox can use that marker to suppress resends, while the unmarked case can duplicate a send; these are design consequences, not a measured production retry loop. Actual Slack request acknowledgement, duplicate suppression, API failures, and end-to-end crash behavior are **inconclusive** because Slack was deliberately not contacted. The measured guarantee is recoverability from this live runtime's retained inbox, not exactly-once delivery or unlimited historical retention. Inbox pagination/retention beyond 100 test rows and runtime restarts were not measured; the Bridge must not claim losslessness if reconciliation coverage is unknown.
+After local send but before the sent marker, the surviving ledger still had `sent:0`; after the marker it had `sent:1`. A replaying outbox can use that marker to suppress resends, while the unmarked case can duplicate a send; these are design consequences, not a measured production retry loop. Actual Slack request acknowledgement, duplicate suppression, API failures, and end-to-end crash behavior are **inconclusive** because Slack was deliberately not contacted. The measured guarantee is recoverability from this live runtime's retained inbox, not exactly-once delivery or unlimited historical retention. The initial reads requested 100 rows; section 6.1 adds a successful limit-1000 read with two returned rows, but truncation/retention at that boundary and runtime restarts were not measured; the Bridge must not claim losslessness if reconciliation coverage is unknown.
 
 ## 2. Arrival after peek
 
@@ -269,7 +269,7 @@ Terminal-list excerpts (only handles; all rows in A, including the Bridge shell)
 }
 ```
 
-The child worker, also started on an existing worktree without keep-open, auto-released too. A shell that `worktree create` had created in the child remained separately; releasing a worker did not close that shell. Keep session history and terminal-resource ownership separate from whether the Task completed.
+Bridge workers should omit `--keep-open` by default and rely on automatic release after settlement. The child worker, also started on an existing worktree without keep-open, auto-released too. A shell that `worktree create` had created in the child remained separately; releasing a worker did not close that shell. Keep session history and terminal-resource ownership separate from whether the Task completed.
 
 ## 5. Lead requests through the Bridge; settled-lead delivery
 
@@ -419,6 +419,169 @@ The spec asked it to run a 60-second sleep and send no worker_done yet. `lsof` i
 Kill at `2026-11-08T11:47:57.757+00:00`. The first sampled `unverifiable/missing_status` projection occurred about `0.12` seconds later. After `32.84` seconds (50 bounded samples), the Dispatch was still `dispatched`, worker `ready`, outcome `in_progress`, and top-level observation `live/exactWorker:true`. There was no completion or exit escalation in the subsequent Run check. The projection and top-level observation therefore disagreed about what was knowable. No later automatic-exit deadline was established.
 
 **Design:** use projection liveness/attention to display unknown when status evidence disappears; neither `ready` nor top-level `live` proves that the agent is working. This trial does not establish a reliable automatic "agent exited" signal for an agent killed within a live shell. Do not infer success, failure, or authorize automatic restart from missing status alone. This criterion is **not verified**, rather than guessed. For authorized test cleanup, guarded `worker-stop` then returned `stopped`, `processAction:closed_agent_terminal`, `ptyKilled:true`; release confirmed the resource was released. That proves cleanup, not autonomous exit detection.
+
+### 6.1. Follow-up: read evidence, agentWait, and an unreported turn end
+
+A second isolated run on the same Orca build measured the missing read paths, using two short `codex --model gpt-6-luna --effort low` workers. One new temporary Git repository was registered after fresh repository/worktree snapshots. Its only sessions were the test Bridge shell and these two workers, started sequentially without `--keep-open`:
+
+```json
+{
+  "repoId": "4556580a-6f68-4fd4-8da7-db115b1d091a",
+  "runId": "run_769570c66e4a",
+  "killedDispatch": "ctx_51a075eb48b7",
+  "killedTerminal": "term_422d3089-e48e-42b9-825f-84d2b76f7931",
+  "unreportedDispatch": "ctx_455391daa66f",
+  "unreportedTerminal": "term_e902bdb8-5360-4de4-a848-aed8b95e08e3"
+}
+```
+Both workers used an existing exact selector in the disposable repository. Commands were actually run for both cases; `D`/`H` were the corresponding Dispatch/terminal ids above:
+
+```sh
+orca orchestration worker-start --run "$FOLLOWUP_RUN" --worktree "$FOLLOWUP_WORKTREE" --agent codex --model gpt-6-luna --effort low --spec "$PROBE_SPEC" --json
+orca orchestration worker-show --dispatch "$D" --json --full
+orca orchestration worker-read --dispatch "$D" --json --full
+orca terminal read --terminal "$H" --screen --json
+orca terminal read --terminal "$H" --json
+# For the unreported turn, also page using the last observed cursor:
+orca orchestration worker-read --dispatch "$D" --cursor "$WORKER_CURSOR" --json --full
+orca terminal read --terminal "$H" --cursor 1 --json
+```
+
+The first spec required a `KILL_PROBE_READY` status before a 45-second sleep, with no completion report. After receipt of that status, `lsof -a -d cwd +d <temporary-repo> -Fpcn` found exactly one `codex` PID in that repository. `SIGKILL` targeted that exact PID. Unlike the original fault trial, this worker had already executed a status-send tool call; its transcript and screen identified GPT-6-Luna. The second spec explicitly instructed the agent to end its turn with `NO_REPORT_PROBE_ENDED`, without tools or any orchestration report. The transcript's final assistant message, rather than an echo of the user prompt, confirmed that behavior.
+
+Measured reads (four post-event samples, nominal waits of 2, 2, and 4 seconds between complete read groups; actual elapsed times include RPC overhead). Kill-case elapsed time is relative to SIGKILL (negative for the before read); the unreported-turn elapsed time is relative to worker-start returning:
+
+| Sample | Elapsed seconds | Projection liveness / requiresAction | activity | observation.agentWait | worker-read source / cursor hash | screen status / nextCursor |
+|---|---:|---|---|---|---|---|
+| kill-before | -0.44 | `live / false` | `working` | `null` | `transcript / 8b87a52575b68ac6` | `running / 1` |
+| kill-after-0 | 0.42 | `unverifiable / true` | `unknown` | `null` | `terminal / 540c92b1426fd076` | `running / 1` |
+| kill-after-1 | 3.00 | `unverifiable / true` | `unknown` | `null` | `terminal / 540c92b1426fd076` | `running / 1` |
+| kill-after-2 | 5.57 | `unverifiable / true` | `unknown` | `null` | `terminal / 540c92b1426fd076` | `running / 1` |
+| kill-after-3 | 10.11 | `unverifiable / true` | `unknown` | `null` | `terminal / 540c92b1426fd076` | `running / 1` |
+| no-report-after-0 | 6.39 | `live / false` | `done` | `null` | `transcript / 1554c002838fa9c2` | `running / 1` |
+| no-report-after-1 | 8.95 | `live / false` | `done` | `null` | `transcript / 1554c002838fa9c2` | `running / 1` |
+| no-report-after-2 | 11.52 | `live / false` | `done` | `null` | `transcript / 1554c002838fa9c2` | `running / 1` |
+| no-report-after-3 | 16.06 | `live / false` | `done` | `null` | `transcript / 1554c002838fa9c2` | `running / 1` |
+
+Cursor hashes are the first 16 hexadecimal characters of SHA-256 of the actual opaque `worker-read.result.cursor`, used only to show equality without dumping opaque tokens. `observation.agentWait` was present and null on **every** sample: Orca had no detected human-wait evidence in either test. This is not an exercise of the non-null wait path; that behavior remains inconclusive.
+
+For the killed agent, `worker-read` switched from `source:transcript` to `source:terminal` with `sourceExact:false` and `contentComplete:false`; its exact `fallbackReason` was `session_not_reported`, while projection liveness reported `missing_status`. All four post-kill cursor values matched. The rendered screen changed from the agent TUI to an idle shell prompt, while terminal status stayed `running`; no `exited` result was observed. Plain terminal reads after the kill returned `source:stream` with `nextCursor:"1"` and `latestCursor:"1"`, unchanged across samples. These readings corroborate a stalled assignment inside a live shell; they do not prove a generic automatic process-exit signal.
+
+For the unreported turn, the screen showed the final marker and an idle agent prompt. The exact transcript read contained this final assistant message:
+
+```json
+{
+  "dispatchId": "ctx_455391daa66f",
+  "finalAssistantMessage": {
+    "role": "assistant",
+    "text": "NO_REPORT_PROBE_ENDED",
+    "timestamp": 1794139696035
+  },
+  "observation": {
+    "status": "live",
+    "exactWorker": true,
+    "agentWait": null
+  },
+  "projectionStage": {
+    "worker": "ready",
+    "dispatch": "dispatched",
+    "detail": "input_accepted",
+    "activity": "done"
+  },
+  "projectionLiveness": {
+    "verdict": "live",
+    "observedAt": 1794139696088,
+    "source": "agent_status"
+  },
+  "attention": {
+    "categories": [],
+    "requiresAction": false
+  }
+}
+```
+Its four `worker-read` cursors were unchanged, yet `projection.liveness` stayed `live`, activity was `done`, and `attention.requiresAction` remained false. Subsequent three reads **with** the stored worker cursor returned `transcript.messages:[]`, `returnedMessageCount:0`, unchanged cursor, and `contentComplete:true`; matching terminal cursor reads returned:
+
+```json
+{
+  "terminal": {
+    "status": "running",
+    "source": "stream",
+    "nextCursor": "1",
+    "latestCursor": "1",
+    "returnedLineCount": 0,
+    "limited": false,
+    "truncated": false
+  }
+}
+```
+The screen reads also returned cursor `"1"` while the agent UI changed, so screen cursor equality alone is weak progress evidence. Use cursor paging and record the returned source; reset the baseline when `worker-read` changes source. Initial whole-transcript reads were clipped (`contentComplete:false`), so their text is not claimed complete. The subsequent empty cursor pages were complete.
+
+Crucially, Orca sent an explicit escalation for the normally ended, unreported turn, even while the above status fields stayed live/ready:
+
+```json
+{
+  "id": "msg_stop_939fc0d84bfd5d3a8eb0d2d2",
+  "type": "escalation",
+  "subject": "Worker stopped without reporting",
+  "payload": "{\"taskId\":\"task_ff841d6019ae\",\"dispatchId\":\"ctx_455391daa66f\",\"handle\":\"term_e902bdb8-5360-4de4-a848-aed8b95e08e3\",\"stopReason\":\"finished\"}",
+  "sequence": 30,
+  "created_at": "2026-11-08T12:08:17Z"
+}
+```
+The payload's `stopReason:"finished"` and exact Dispatch identity are a usable interruption signal for this case; the process itself has not exited. No corresponding missing-report escalation for the killed worker appeared in this run's inbox. Thus ordinary turn-end detection is **verified in this trial**, while reliable detection of a killed agent inside its live shell remains **not verified**. Human-wait detection and a terminal read returning `exited` remain **inconclusive**, because neither occurred in these probes.
+
+The Bridge policy now connects these findings to the card states: transient unverifiable evidence shows status unknown; persisting unverifiable evidence with requiresAction, past a grace window of two poll cycles and no cursor progress, shows lead interrupted. An explicit terminal `exited` or a correlated stopped-without-reporting escalation also shows interrupted. This is a proposed Bridge policy, not a measured Slack UI. M2 offers owner-directed recovery; fence the predecessor using worker-stop or worker-abandon before replacement. Never auto-restart, never equate interrupted work with proven OS process death, and do not classify human waits or silence alone as interruption.
+
+Follow-up recovery read, actually executed:
+
+```sh
+orca orchestration inbox --terminal "run:$FOLLOWUP_RUN" --limit 1000 --json --full
+```
+
+```json
+{
+  "count": 2,
+  "messages": [
+    {
+      "id": "msg_stop_939fc0d84bfd5d3a8eb0d2d2",
+      "sequence": 30,
+      "type": "escalation",
+      "read": 0
+    },
+    {
+      "id": "msg_2dabb004381b",
+      "sequence": 29,
+      "type": "status",
+      "read": 0
+    }
+  ]
+}
+```
+
+The 1000-row request succeeded and returned two rows. The ledger must retain each message id and its `sequence` from inbox (the original consuming-check excerpts did not include sequence). On startup, coverage is complete only if `count < 1000` or the oldest returned message overlaps an existing ledger row with the same id and sequence; otherwise flag a gap instead of promising no loss. The full-1000/overlap boundary and historical retention were not exercised here; those remain design rules requiring later tests, not measured guarantees. [Example 12 and the recovery paragraph](../brief.md#4-架构) use the same rule.
+
+Cleanup stopped and released both exact Dispatches (`state:stopped`, `processAction:closed_agent_terminal`, followed by `state:released`), closed only the created Bridge shell, deregistered only the new setup id, and removed the temporary repository and private probe files. Both resources were recorded `terminalState:released`; no default worker auto-release is expected before an accepted worker_done, which neither test sent. No reset was run; inert audit history remains as in the original trial. Main checkout HEAD and clean status matched the fresh baseline. New before/after inventory projection:
+
+```json
+{
+  "repos": {
+    "beforeCount": 25,
+    "afterCount": 25,
+    "added": [],
+    "removed": [],
+    "beforeOriginalIdsSha256": "4c97d3bf606a23b0bdacf3059191581b0d4ce1b459ebf54919ba2e3f720862c6",
+    "afterOriginalIdsSha256": "4c97d3bf606a23b0bdacf3059191581b0d4ce1b459ebf54919ba2e3f720862c6"
+  },
+  "worktrees": {
+    "beforeCount": 27,
+    "afterCount": 27,
+    "added": [],
+    "removed": [],
+    "beforeOriginalIdsSha256": "556e5d47f5e97f6e06d444a568e0b6035b4e1e08e81ab02192574bcf7b10474e",
+    "afterOriginalIdsSha256": "556e5d47f5e97f6e06d444a568e0b6035b4e1e08e81ab02192574bcf7b10474e"
+  }
+}
+```
 
 ## 7. Cleanup and before/after inventories
 
@@ -588,15 +751,16 @@ after  git status --porcelain=v1: <empty>
 
 Use the measured path: own authenticated Bridge caller → one Run → exact worktree creation with explicit parent → worker-start with the same Run. Make leads request child work as durable messages. Start a new lead session on the retained worktree to deliver a child result after settlement, supplying all context explicitly. Track Task outcome, Dispatch identity, session/terminal resource, worktree lineage, and liveness evidence independently. Keep-open is a resource choice, not a Task state.
 
-For reporting, persist peek, consume, persist the entire returned batch, send, then mark sent; reconcile inbox including read messages on startup. The late-message crash test shows why peek persistence alone is insufficient. Use message-id deduplication and a replayable outbox; possible duplicate downstream sends remain part of the design. Reconciliation coverage/retention must be explicit before promising no lost messages. Store unknown liveness when evidence disappears and leave recovery decisions to the authorized owner.
+For reporting, persist peek, consume, persist the entire returned batch, send, then mark sent; reconcile inbox including read messages on startup. Retain each message’s sequence from inbox, request 1000 rows, and mark coverage complete only when count is below 1000 or the oldest returned row overlaps the ledger; otherwise flag a gap (section 6.1). The late-message crash test shows why peek persistence alone is insufficient. Use message-id deduplication and a replayable outbox; possible duplicate downstream sends remain part of the design. Reconciliation coverage/retention must be explicit before promising no lost messages. Store unknown liveness when evidence disappears and leave recovery decisions to the authorized owner.
 
 Changes to the product brief are deliberately narrow:
 
-1. Architecture's message-recovery paragraph now names read-history reconciliation and its late-arrival crash window, and links this evidence; its unconditional no-loss wording is qualified by retained inbox coverage.
-2. The pre-ledger spike entry now links the measured report and calls out the unverified automatic-exit signal.
-3. The unverified-risk list distinguishes the measured local cross-repository/new-session path from still-unverified Slack integration and killed-agent detection.
+1. Recovery uses `inbox --terminal run:<run_id> --limit 1000 --json --full`, records message sequence, and checks oldest-row ledger overlap before accepting a full page as complete; Example 12 links the rule.
+2. Lead status and Example 17 connect transient unknown evidence to interruption after the default two-cycle grace window and stalled cursors, terminal exit, or a correlated missing-report escalation; recovery fences the old Dispatch first and never auto-restarts.
+3. Bridge workers omit `--keep-open` by default and rely on auto-release after settlement.
+4. The measurement links and remaining-risk list distinguish measured local behavior from unverified Slack integration; personal and prototype-branch labels use neutral wording.
 
-References: [docs/brief.md:297](../brief.md#4-架构), [docs/brief.md:309](../brief.md#5-交付里程碑), [docs/brief.md:328](../brief.md#7-未验证). Slack behavior, worktree deletion/session recovery, remote execution, and OpenViking attachment remain outside this experiment.
+References: [docs/brief.md:299](../brief.md#4-架构), [docs/brief.md:311](../brief.md#5-交付里程碑), [docs/brief.md:330](../brief.md#7-未验证). Slack behavior, worktree deletion/session recovery, remote execution, and OpenViking attachment remain outside this experiment.
 
 ## 8. Public-safety and validation probe
 

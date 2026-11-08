@@ -1,6 +1,6 @@
 # orca-slack — 产品 Brief
 
-日期：2026-11-08。状态：Stometa 已逐项确认，已按 Argon 评审修订，作为开工基线。
+日期：2026-11-08。状态：已逐项确认并完成评审修订，作为开工基线。
 
 本文定义**最终交付时用起来是什么样**。历史取舍记录在 `docs/features.md`、`docs/feature-matrix.md`；两者冲突时以本文为准。
 
@@ -91,12 +91,12 @@ PR 状态来源：Bridge 账本记录每个 worktree 的 repo 和分支，每 60
 ### lead agent
 
 - lead 是**角色，不是一个长期进程**：每个线程任何时刻最多一个 lead session，从聊需求一直负责到收尾，小需求自己实现。
-- PR 打开后 session 结束，worktree 保留。之后收到线程回复、需要自动修复或返工时，在同一 worktree 启动新 session。
+- PR 打开后 session 结束，worktree 保留。Bridge 启动 worker 默认省略 `--keep-open`，依赖 Orca 在收到有效 `worker_done` 后的自动释放；终端释放不删除 worktree。之后收到线程回复、需要自动修复或返工时，在同一 worktree 启动新 session。
 - 人的消息只发给 lead。lead 决定是否拆分，**直接开始，不需要批准**，但由 **Bridge 代建**子 worktree，新 worktree 出现在状态卡上。
 - Bridge 是唯一的 Orca Run 协调者，所有 agent 的回报都进 Bridge 的收件箱。子 agent 的汇报由 Bridge 转给当前 lead；需要人决定时发决定卡。
 - lead 的启动指令明确禁止直接派发 worker，只能向 Bridge 发结构化请求，否则 Orca 默认的子派发会绕过账本。
 - 子 agent 回报时：lead 有活跃 session 就转发；没有就在 lead 的 worktree 启动新 session 并带上这条回报。
-- Bridge 定期查询活跃派发，agent 无上报退出时状态卡显示“lead 已中断”（M1 只显示，M2 加 [恢复]）。
+- Bridge 定期查询活跃派发。`projectionLiveness` 为 `unverifiable` 时先显示“状态未知”；若 `unverifiable` 与 `attention.requiresAction: true` 同时持续超过宽限窗口（默认 2 个轮询周期），且 `worker-read` 与 terminal read 的游标均无推进，状态卡转为“lead 已中断”；terminal read 明确返回 `exited` 也转为中断（M1 只显示，M2 加 [恢复]，见示例 17）。明确收到与该 Dispatch 对应的无回报结束 escalation（如 `stopReason: finished`）也显示中断。无输出本身不能证明中断，已确认的等人状态按决定卡处理；读取源变化时重置游标比较基线，永不自动重启。
 - 共享上下文在 Bridge 保存的线程记录里，新 session 启动时带上线程全文、ticket 和子 worktree 列表。
 
 ## 3. 示例
@@ -222,7 +222,7 @@ Bridge 立即转发每条消息，批量投递交给 Orca 的 mailbox，Bridge �
 
 ### 示例 12：系统自己出问题 · M1
 
-- Bridge 重启：任务继续跑，回报不丢，状态卡恢复；最坏情况是重复一条消息。
+- Bridge 重启：任务继续跑，按[消息恢复规则](#4-架构)用 inbox 与账本对账后恢复状态卡；历史覆盖完整时回报可恢复，最坏情况是重复一条消息，覆盖不足则明确标记缺口。
 - Orca 状态不确定：状态卡显示“状态未知”，不编造成功。
 - 无权限的人 @bot：只有对方看到一句拒绝，不启动任何东西。
 
@@ -274,7 +274,9 @@ agent 只 push 代码，不在 GitHub 上回复或 resolve 评论。
 你：恢复 → 同一 worktree 启动新 lead，带线程全文、ticket 和子 worktree 列表
 ```
 
-不自动重启；已在运行的子 agent 不动。
+短暂的 `projectionLiveness: unverifiable` 先显示“状态未知”。若 `unverifiable` 与 `attention.requiresAction: true` 同时持续超过宽限窗口（默认 2 个轮询周期），且 `worker-read` / terminal read 的游标都不再推进，则显示“lead 已中断”；terminal read 明确返回 `exited` 也转为中断；明确收到该 Dispatch 的无回报结束 escalation（如 `stopReason: finished`）也进入此状态。不能仅凭一次查询或无输出认定进程已退出，读取源变化时重置游标比较基线。
+
+owner 点 [恢复] 后，先用 `worker-stop` 或 `worker-abandon` 成功 fence 旧 Dispatch，再在同一 worktree 启动替代 session；`worker-abandon` 不证明旧进程已停止。永不自动重启；已在运行的子 agent 不动。
 
 ### 示例 18：一键清理多个 worktree · M2
 
@@ -294,7 +296,7 @@ Bridge：去重 → 保存线程 → 权限 → 转发 → 渲染四种消息
   └ 回报循环：唯一的消息消费者
 ```
 
-- **消息恢复**：`check` 读取时就标记已处理，所以回报循环先 `--peek`，写入 SQLite，再消费，并把消费返回的整批消息按 message id 写入 SQLite（peek 之后到达的消息也在这批里），然后发 Slack，发送成功才标记完成；启动时用 `inbox --terminal run:<run_id> --full` 对账，必须包含已读消息，补回“消费后、整批入库前”崩溃时尚未持久化的新消息。恢复依赖 Orca 保留的 inbox 历史；覆盖范围未知时不能保证消息不丢（[实测](spikes/2026-11-08-orca-coordination.md#1-crash-recovery-at-each-boundary)）。Slack 入站事件也要在同一事务里写去重键和消息，转发成功才标记完成，重启时重放。
+- **消息恢复**：`check` 读取时就标记已处理，所以回报循环先 `--peek`，写入 SQLite，再消费，并把消费返回的整批消息按 message id 写入 SQLite（peek 之后到达的消息也在这批里），然后发 Slack，发送成功才标记完成；每条消息的 `sequence`（从 inbox 取得）与 message id 一同持久化。启动时用 `inbox --terminal run:<run_id> --limit 1000 --json --full` 对账，必须包含已读消息，补回“消费后、整批入库前”崩溃时尚未持久化的新消息。只有返回 `count < 1000`，或返回的最旧消息已在账本中（用 message id 与 `sequence` 确认重叠），才把历史覆盖记为完整；否则明确标记缺口，不声称消息不丢。恢复依赖 Orca 保留的 inbox 历史（[实测](spikes/2026-11-08-orca-coordination.md#1-crash-recovery-at-each-boundary)）。Slack 入站事件也要在同一事务里写去重键和消息，转发成功才标记完成，重启时重放。
 
 - 一个 Slack app 对应一个 Bridge 实例，worker 数量不限。
 - 只考虑同一家公司，运行在专用机器上。
@@ -306,7 +308,7 @@ Bridge：去重 → 保存线程 → 权限 → 转发 → 渲染四种消息
 
 ## 5. 交付里程碑
 
-**账本设计依据**：[2026-11-08 Orca 协调实测](spikes/2026-11-08-orca-coordination.md)已验证本地 `check --peek` 恢复、Bridge 跨 repo 代建子 worktree、同一 worktree 新 session、`--keep-open` 与自动释放、Bridge 转发子 agent 回报；agent 被杀而 shell 仍存活时，自动退出判定未验证，必须显示状态未知。真实 Slack 投递仍待端到端验收。
+**账本设计依据**：[2026-11-08 Orca 协调实测](spikes/2026-11-08-orca-coordination.md)已验证本地 `check --peek` 恢复、Bridge 跨 repo 代建子 worktree、同一 worktree 新 session、`--keep-open` 与自动释放、Bridge 转发子 agent 回报；agent 被杀而 shell 仍存活时，自动退出判定未验证，先显示状态未知，再按示例 17 的宽限窗口和读取证据决定是否显示中断。真实 Slack 投递仍待端到端验收。
 
 | 里程碑 | 内容 | 示例 |
 |---|---|---|
@@ -329,4 +331,4 @@ Bridge：去重 → 保存线程 → 权限 → 转发 → 渲染四种消息
 - Slack 编辑消息不触发通知（标准行为，未在目标 workspace 验证）。
 - worktree 删除后 session 能否恢复。
 - Orca 启动的 agent 是否自动带上 OpenViking MCP。
-- `stone/p0-bridge` 的数据模型要按“一线程多 worktree”调整；其 `check --ack` 调用和先记事件后转发的逻辑必须修改（Argon F-12、F-13）。
+- 早期原型分支的数据模型要按“一线程多 worktree”调整；其 `check --ack` 调用和先记事件后转发的逻辑必须修改（评审项 F-12、F-13）。
