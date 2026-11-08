@@ -18,6 +18,13 @@ export interface Decision {
 }
 export interface Report extends Message { runId: string; state: 'pending' | 'sent' }
 export interface Coverage { state: 'complete' | 'gap'; count: number }
+export interface SlackEvent {
+  installationId: string; eventId: string; channel: string; ts: string; threadTs?: string;
+  user: string; text: string; botMessage?: boolean;
+}
+export interface Inbound extends SlackEvent {
+  key: string; threadId: string; kind: 'prompt' | 'stop' | 'archive'; state: 'pending' | 'forwarded' | 'archived';
+}
 
 export class Store {
   private db: DatabaseSync;
@@ -47,7 +54,13 @@ export class Store {
         state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'sent')),
         PRIMARY KEY(runId, id), UNIQUE(runId, sequence));
       CREATE TABLE IF NOT EXISTS coverage (
-        runId TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('complete', 'gap')), count INTEGER NOT NULL);`);
+        runId TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('complete', 'gap')), count INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS inbound (
+        key TEXT PRIMARY KEY, installationId TEXT NOT NULL, eventId TEXT NOT NULL,
+        threadId TEXT NOT NULL REFERENCES threads(id), message TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('prompt', 'stop', 'archive')),
+        state TEXT NOT NULL CHECK(state IN ('pending', 'forwarded', 'archived')),
+        UNIQUE(installationId, eventId));`);
   }
   private transaction<T>(work: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -120,13 +133,13 @@ export class Store {
   }
   private writeReports(runId: string, messages: Message[]): void {
     for (const message of messages) {
-        const existing = this.db.prepare('SELECT sequence FROM reports WHERE runId=? AND id=?').get(runId, message.id);
-        if (existing?.sequence != null && message.sequence != null && existing.sequence !== message.sequence) {
-          throw new Error(`Report sequence changed: ${message.id}`);
-        }
-        this.db.prepare(`INSERT INTO reports(runId, id, sequence, message) VALUES (?, ?, ?, ?)
-          ON CONFLICT(runId, id) DO UPDATE SET sequence=COALESCE(reports.sequence, excluded.sequence)`)
-          .run(runId, message.id, message.sequence ?? null, JSON.stringify(message));
+      const existing = this.db.prepare('SELECT sequence FROM reports WHERE runId=? AND id=?').get(runId, message.id);
+      if (existing?.sequence != null && message.sequence != null && existing.sequence !== message.sequence) {
+        throw new Error(`Report sequence changed: ${message.id}`);
+      }
+      this.db.prepare(`INSERT INTO reports(runId, id, sequence, message) VALUES (?, ?, ?, ?)
+        ON CONFLICT(runId, id) DO UPDATE SET sequence=COALESCE(reports.sequence, excluded.sequence)`)
+        .run(runId, message.id, message.sequence ?? null, JSON.stringify(message));
     }
   }
   reports(runId: string): Report[] {
@@ -155,6 +168,27 @@ export class Store {
   }
   coverage(runId: string): Coverage | undefined {
     return this.db.prepare('SELECT state, count FROM coverage WHERE runId=?').get(runId) as Coverage | undefined;
+  }
+  saveInbound(thread: Thread, event: SlackEvent, kind: Inbound['kind']): boolean {
+    return this.transaction(() => {
+      const key = JSON.stringify([event.installationId, event.channel, event.ts]);
+      if (this.db.prepare('SELECT 1 FROM inbound WHERE key=? OR (installationId=? AND eventId=?)')
+        .get(key, event.installationId, event.eventId)) return false;
+      if (!this.thread(thread.id)) this.saveThread(thread);
+      this.db.prepare('INSERT INTO inbound VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(key, event.installationId, event.eventId, thread.id, JSON.stringify(event), kind,
+          kind === 'archive' ? 'archived' : 'pending');
+      return true;
+    });
+  }
+  inbound(threadId?: string): Inbound[] {
+    const rows = threadId === undefined ? this.db.prepare('SELECT * FROM inbound ORDER BY rowid').all()
+      : this.db.prepare('SELECT * FROM inbound WHERE threadId=? ORDER BY rowid').all(threadId);
+    return rows.map(row => ({ ...JSON.parse(row.message as string), key: row.key, threadId: row.threadId,
+      kind: row.kind, state: row.state })) as Inbound[];
+  }
+  markInboundForwarded(key: string): void {
+    this.db.prepare("UPDATE inbound SET state='forwarded' WHERE key=? AND state='pending'").run(key);
   }
   close(): void { this.db.close(); }
 }
