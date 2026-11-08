@@ -88,7 +88,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS cleanup_receipts (
         worktreeId TEXT PRIMARY KEY, threadId TEXT NOT NULL, record TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('saved', 'deleted')), removalReceipt TEXT,
-        FOREIGN KEY(worktreeId, threadId) REFERENCES worktrees(id, threadId));`);
+        FOREIGN KEY(worktreeId, threadId) REFERENCES worktrees(id, threadId));
+      CREATE UNIQUE INDEX IF NOT EXISTS pull_request_url ON pull_requests(url);`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS routing_samples (
         threadId TEXT PRIMARY KEY REFERENCES threads(id), text TEXT NOT NULL, repository TEXT,
@@ -335,8 +336,8 @@ export class Store {
       const changes: ObservedPullRequest[] = [];
       for (const observed of prs) {
         const existing = this.db.prepare(`SELECT p.*, o.number, o.state, o.headRefOid FROM pull_requests p
-          LEFT JOIN pr_observations o ON o.id=p.id WHERE p.id=? OR (p.url=? AND p.worktreeId=?) LIMIT 1`)
-          .get(observed.id, observed.url, observed.worktreeId);
+          LEFT JOIN pr_observations o ON o.id=p.id WHERE p.id=? OR p.url=? LIMIT 1`)
+          .get(observed.id, observed.url);
         const pr = { ...observed, id: existing ? existing.id as string : observed.id };
         if (existing && existing.worktreeId !== pr.worktreeId) throw new Error('Pull request belongs to another worktree');
         if (existing && existing.url === pr.url && existing.number === pr.number &&
