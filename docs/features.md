@@ -149,6 +149,8 @@ P1 变化：1.6 LLM 判意图 + eval（先用 P0 收样本）· 1.7 owner DM 入
 
 本节覆盖上文冲突的内容（"一线程 = 一 worktree"、5.7 的 14 天空闲关闭、#19 一公司一进程）。
 
+> 已被 `docs/brief.md` 取代的结论：一线程可以有多个 worktree 和 PR；Spec 和实现合并为 lead 角色；纯提问使用临时 worktree。冲突时以 brief 为准。
+
 - **范围**：只考虑同一家公司，不设计多公司隔离；#19 和多租户问题搁置。
 - **运行位置**：专门的机器长期运行。
 - **一需求一 worktree**：一个需求 = 一个线程 = 一个 worktree = 一个 PR；10 个需求就是 10 个 worktree。同一需求的跟进在自己的 worktree 里开新 session。纯提问不建 worktree。

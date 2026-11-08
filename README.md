@@ -1,11 +1,12 @@
 # orca-slack
 
-Slack thread ⇄ [Orca](https://onorca.dev) orchestration bridge. One requirement = one thread = one worktree = one PR; questions that change no code need no worktree.
+Slack thread ⇄ [Orca](https://onorca.dev) orchestration bridge. One piece of work = one Slack thread with one lead agent, which can drive several worktrees and PRs; see docs/brief.md.
 
 A small always-on process on the machine that runs Orca: it listens to Slack (Socket Mode), starts an Orca coordinator per thread with `orca orchestration worker-start`, relays the coordinator's questions and reports back into the thread, and lets the thread stop it. No board, no tracker, no agent mesh.
 
 Status: requirements aligned, tech spec in progress, P0 code exists on a side branch and has not run against a live Slack app yet.
 
+- Product brief, the baseline for what we build: [docs/brief.md](docs/brief.md)
 - Requirements and priorities: [docs/features.md](docs/features.md)
 - Feature matrix against three reference bridges, with the 2026-11-07 decisions: [docs/feature-matrix.md](docs/feature-matrix.md)
 
