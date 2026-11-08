@@ -43,10 +43,10 @@ export class Bridge {
     const failed = results.find(result => result.status === 'rejected');
     if (failed) throw failed.reason;
   }
-  private async stop(threadId: string, messageKey?: string): Promise<void> {
+  private async stop(threadId: string, messageKey?: string, cutoff = messageKey): Promise<void> {
     if (this.leads) {
       await this.leads.stop(threadId, messageKey);
-      this.store.archivePendingPrompts(threadId, messageKey);
+      if (cutoff) this.store.archivePendingPrompts(threadId, cutoff);
       if (messageKey) this.store.markInboundForwarded(messageKey);
       return;
     }
@@ -55,7 +55,7 @@ export class Bridge {
       await this.orca.call('worker-stop', ['--dispatch', lead.dispatchId]);
       this.store.endLead(lead.id);
     }
-    this.store.archivePendingPrompts(threadId, messageKey);
+    if (cutoff) this.store.archivePendingPrompts(threadId, cutoff);
     if (messageKey) this.store.markInboundForwarded(messageKey);
   }
   private async forwardPending(threadId: string): Promise<void> {
@@ -73,6 +73,7 @@ export class Bridge {
     }
   }
   action(action: Action): Promise<boolean> {
+    const cutoff = action.actionId === 'stop' ? this.store.inbound(action.threadId).at(-1)?.key : undefined;
     return this.serial(action.threadId, async () => {
       const thread = this.store.thread(action.threadId);
       if (!thread || thread.channel !== action.channel) return false;
@@ -82,7 +83,7 @@ export class Bridge {
       }
       const lead = this.store.leadSessions(thread.id).find(session => session.active);
       if (action.actionId === 'stop') {
-        await this.stop(thread.id);
+        await this.stop(thread.id, undefined, cutoff);
       } else if (action.actionId === 'decision') {
         if (this.leads) return this.leads.answer(thread.id, action.decisionId, action.option, action.user);
         const decision = this.store.decision(action.decisionId);
