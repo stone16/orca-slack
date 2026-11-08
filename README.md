@@ -34,7 +34,7 @@ npm test
 npm run build
 ```
 
-[Store](src/store.ts#L37) uses `node:sqlite` for threads, worktrees, pull requests, lead sessions, decisions, and delivery records.
+[Store](src/store.ts#L38) uses `node:sqlite` for threads, worktrees, pull requests, lead sessions, decisions, and delivery records.
 [Bridge](src/slack.ts#L16) saves inbound Slack messages before forwarding and gates actions by allowlist and owner.
 The caller supplies normalized Slack events, refusal delivery, and the authorized retry, cleanup, and repository-switch handlers.
 
@@ -47,11 +47,14 @@ A known inbox coverage gap stays recorded in `Store.coverage(runId)`.
 ## Track pull requests and confirm cleanup
 
 [PrPoller](src/pr-poller.ts#L5) queries `gh pr list` for every retained worktree with its repository, branch, and all PR states.
-`poll()` returns changed PRs and per-worktree failures; unchanged PRs produce no update.
+`poll()` returns and acknowledges pending PR changes, plus per-worktree failures; unchanged PRs produce no new update.
+`poll(threadId, onChange)` acknowledges each change only after its callback succeeds.
 `start(onChange, onFailure)` schedules a poll every 60 seconds, skips overlapping timer ticks, and returns a function that stops future ticks.
 Callbacks may complete asynchronously; a poll remains busy until they settle.
-Call `poll()` directly for startup reconciliation.
-Callback exceptions do not stop later updates or polling ticks; change-callback errors are reported through `onFailure`.
+Use `poll(undefined, onChange)` for startup delivery with acknowledgment after the callback succeeds.
+Callback exceptions do not stop other PR updates or polling ticks; change-callback errors are reported through `onFailure`.
+Failed changes remain in SQLite for retry, including across restarts and worktree cleanup, with later transitions for the same PR held behind them.
+A crash after delivery and before acknowledgment can repeat a change.
 Malformed responses, truncated results, and command failures preserve the last known state and retry on the next poll.
 
 Use one [Cleanup](src/cleanup.ts#L20) instance per Bridge.
@@ -61,10 +64,11 @@ The latest PR is the one with the highest PR number.
 It compares `headRefOid`, so squash merges pass.
 
 After an explicit owner confirmation, call `confirm(worktreeId, ownerId)` through the existing Bridge owner-action handler.
-It saves the PR links, final commit, confirmation receipt, session identities, and matching reports before asking Orca to remove that exact worktree instance.
+It saves the PR links and merged state atomically with the final commit, confirmation receipt, session identities, and matching reports before asking Orca to remove that exact worktree instance.
 It checks safety again after saving and never passes `--force` or `--delete-branch`.
 Retrying a saved confirmation rechecks safety; an absent Orca entry and absent directory complete recovery without another deletion.
 `Store.cleanupReceipts(threadId)` retains the history after cleanup, and cleaned worktrees leave the poller's active set.
+Deleted worktrees' PR history does not block cleanup of the remaining worktrees.
 The ledger file must remain outside any worktree being removed.
 Button rendering and live Slack integration remain for the runtime slice.
 

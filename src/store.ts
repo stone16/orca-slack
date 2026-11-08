@@ -33,6 +33,7 @@ export interface CleanupReceipt {
   finalCommit: string; pullRequests: ObservedPullRequest[]; sessions: LeadSession[]; reports: Report[];
   confirmedBy: string; savedAt: string; state: 'saved' | 'deleted'; removalReceipt?: unknown;
 }
+export interface PullRequestChange { id: number; pullRequest: ObservedPullRequest }
 
 export interface RoutingSample {
   threadId: string; text: string; repository: string | null;
@@ -89,7 +90,9 @@ export class Store {
         worktreeId TEXT PRIMARY KEY, threadId TEXT NOT NULL, record TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('saved', 'deleted')), removalReceipt TEXT,
         FOREIGN KEY(worktreeId, threadId) REFERENCES worktrees(id, threadId));
-      CREATE UNIQUE INDEX IF NOT EXISTS pull_request_url ON pull_requests(url);`);
+      CREATE UNIQUE INDEX IF NOT EXISTS pull_request_url ON pull_requests(url);
+      CREATE TABLE IF NOT EXISTS pull_request_changes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, worktreeId TEXT NOT NULL REFERENCES worktrees(id), payload TEXT NOT NULL);`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS routing_samples (
         threadId TEXT PRIMARY KEY REFERENCES threads(id), text TEXT NOT NULL, repository TEXT,
@@ -373,9 +376,19 @@ export class Store {
       this.db.prepare(`INSERT INTO pr_observations VALUES (?, ?, ?, ?) ON CONFLICT(id)
         DO UPDATE SET number=excluded.number, state=excluded.state, headRefOid=excluded.headRefOid`)
         .run(pr.id, pr.number, pr.state, pr.headRefOid);
+      this.db.prepare('INSERT INTO pull_request_changes(worktreeId, payload) VALUES (?, ?)')
+        .run(pr.worktreeId, JSON.stringify(pr));
       changes.push(pr);
     }
     return changes;
+  }
+  pendingPullRequestChanges(threadId?: string): PullRequestChange[] {
+    return this.db.prepare(`SELECT c.id, c.payload FROM pull_request_changes c JOIN worktrees w ON w.id=c.worktreeId
+      WHERE (? IS NULL OR w.threadId=?) ORDER BY c.id`).all(threadId ?? null, threadId ?? null)
+      .map(row => ({ id: row.id as number, pullRequest: JSON.parse(row.payload as string) }));
+  }
+  markPullRequestChangeDelivered(id: number): void {
+    this.db.prepare('DELETE FROM pull_request_changes WHERE id=?').run(id);
   }
   close(): void { this.db.close(); }
 }

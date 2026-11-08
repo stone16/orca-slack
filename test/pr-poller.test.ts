@@ -1,12 +1,20 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
 import { Store } from '../src/store.js';
 import { PrPoller } from '../src/pr-poller.js';
 import type { RunCommand } from '../src/commands.js';
 
 const stores: Store[] = [];
-afterEach(() => { vi.useRealTimers(); for (const store of stores.splice(0)) store.close(); });
-function ledger(): Store {
-  const store = new Store(':memory:');
+const roots: string[] = [];
+afterEach(() => {
+  vi.useRealTimers();
+  for (const store of stores.splice(0)) store.close();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true });
+});
+function ledger(file = ':memory:'): Store {
+  const store = new Store(file);
   stores.push(store);
   store.saveThread({ id: 'thread', channel: 'C1', threadTs: '1', owner: 'U1' });
   store.saveWorktree({ id: 'tree', threadId: 'thread', repository: 'example/web', branch: 'feat/export' });
@@ -137,17 +145,19 @@ test.each([
   const poller = new PrPoller(store, async () => {
     polls++;
     if (callback === 'failure' && polls === 1) throw new Error('gh offline');
-    return JSON.stringify([{ ...open, headRefOid: polls === 1 ? 'a'.repeat(40) : 'b'.repeat(40) }]);
+    return JSON.stringify([open]);
   });
   let changes = 0;
+  const delivered: unknown[] = [];
   const failures: unknown[] = [];
   const fail = (message: string) => {
     if (asynchronous) return Promise.reject(new Error(message));
     throw new Error(message);
   };
-  const stop = poller.start(() => {
+  const stop = poller.start(change => {
     changes++;
     if (callback === 'change' && changes === 1) return fail('change callback failed');
+    delivered.push(change);
   }, failure => {
     failures.push(failure);
     if (callback === 'failure') return fail('failure callback failed');
@@ -158,10 +168,57 @@ test.each([
     expect(unhandled).toEqual([]);
     expect(polls).toBe(2);
     expect(changes).toBe(callback === 'change' ? 2 : 1);
+    expect(delivered).toEqual([{ ...open, id: open.url, worktreeId: 'tree' }]);
     expect(failures).toEqual([{ worktreeId: 'tree', reason: callback === 'change'
       ? 'PR change callback failed' : 'GitHub poll failed' }]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(polls).toBe(3);
+    expect(delivered).toHaveLength(1);
+    expect(changes).toBe(callback === 'change' ? 2 : 1);
   } finally {
     stop();
     process.off('unhandledRejection', listener);
   }
+});
+
+test('a failed PR notification stays ahead of its later transitions and each succeeds once', async () => {
+  const store = ledger();
+  let current = open;
+  const poller = new PrPoller(store, async () => JSON.stringify([current]));
+  const attempted: string[] = [];
+  const delivered: string[] = [];
+  const notify = (change: { state: string }) => {
+    attempted.push(change.state);
+    if (attempted.length <= 2) throw new Error('delivery unavailable');
+    delivered.push(change.state);
+  };
+  await poller.poll(undefined, notify);
+  current = { ...open, state: 'MERGED' };
+  await poller.poll(undefined, notify);
+  expect(attempted).toEqual(['OPEN', 'OPEN']);
+  expect(delivered).toEqual([]);
+  await poller.poll(undefined, notify);
+  expect(delivered).toEqual(['OPEN', 'MERGED']);
+  await poller.poll(undefined, notify);
+  expect(delivered).toEqual(['OPEN', 'MERGED']);
+});
+
+test('a failed change callback survives reopen while the ledger keeps the observed PR state', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-pr-delivery-'));
+  roots.push(root);
+  const file = join(root, 'ledger.sqlite');
+  const store = ledger(file);
+  const run: RunCommand = async () => JSON.stringify([open]);
+  const first = await new PrPoller(store, run).poll(undefined, async () => { throw new Error('delivery failed'); });
+  expect(first.failures).toEqual([{ worktreeId: 'tree', reason: 'PR change callback failed' }]);
+  expect(store.observedPullRequests('thread')).toEqual([{ ...open, id: open.url, worktreeId: 'tree' }]);
+  store.close();
+  stores.splice(stores.indexOf(store), 1);
+  const reopened = new Store(file);
+  stores.push(reopened);
+  const delivered: unknown[] = [];
+  const poller = new PrPoller(reopened, run);
+  await poller.poll(undefined, change => { delivered.push(change); });
+  await poller.poll(undefined, change => { delivered.push(change); });
+  expect(delivered).toEqual([{ ...open, id: open.url, worktreeId: 'tree' }]);
 });
