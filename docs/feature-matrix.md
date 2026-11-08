@@ -1,6 +1,6 @@
 # 功能点矩阵：我们要什么 × 三个参照各做了什么
 
-日期：2026-11-07。这是**决定清单**，不是实现计划。"我们"一列是提案，待 Stometa 逐行拍板；带 ❓ 的是我拿不准、需要他答的。
+日期：2026-11-07。这是**决定清单**，不是实现计划。"我们"一列是提案，待所有者逐行拍板；带 ❓ 的是我拿不准、需要他答的。
 
 参照仓库（代码审读，不是 README）：
 
@@ -30,10 +30,10 @@
 |---|---|---|---|---|---|
 | 2.1 | 走 `orca orchestration`（Run/Task/Dispatch 有生命周期权威） | **P0** | ✅ 读：`run-list/task-list/worker-list/inbox`；写：`gate-resolve`（`orca/client.ts:68-1401`） | ✗ 完全不用 | ✅ `run-use`/`run-create` + `worker-start --spec --worktree new-top-level --repo id:… --agent claude --timeout-ms 600000`；跟进 `send`，答题 `reply`，完成 `worker-release`（`orca.ts:31-259`）|
 | 2.2 | 一任务一 worktree；**一线程多 dispatch 复用 worktree**（11-07 定） | **P0** | — 不派发 | ✅ `orca worktree create --setup skip`（`:1436-1465`） | ✅ `new-top-level`；跟进复用 worktree 但**每次跟进新开 dispatch**（`jobs.ts:48,133`）|
-| 2.3 | 任务文本如何到 agent | **P0** spec + 头部（请求人、线程链接、回报规则） | — | argv `$(cat prompt)` + `--append-system-prompt-file`（`:1420-1465`） | ✅ `--spec`；spec 里要求 `pstack:poteto-mode`、里程碑 status、报告文件、worker_done（`spec.ts:93-166`）|
+| 2.3 | 任务文本如何到 agent | **P0** spec + 头部（请求人、线程链接、回报规则） | — | argv `$(cat prompt)` + `--append-system-prompt-file`（`:1420-1465`） | ✅ `--spec`；spec 里要求执行者的开发与验证工作流、里程碑 status、报告文件、worker_done（`spec.ts:93-166`）|
 | 2.4 | 多厂商 agent（Claude / Codex / Grok / Argon）按路由表 | **P0** 配置里 agent/model/effort | ◐ Claude + Codex coordinator（叫醒方式不同） | ✗ Claude only（门、helper 全绑 Claude hooks） | ✗ Claude only，硬编码 `--agent claude`（`orca.ts:69`）|
 | 2.5 | 同一 issue 已在别的线程 → 指过去 | **P1** | ✗ | ✗ | ✅ 最多列 3 个前例带摘要，只警告不阻止（`antecedents.ts:20`）|
-| 2.6 | 评审链（worker_done 后起不同模型 evaluator） | **P2，且在 stometa-mode 不在桥** | ✗ | ✗ | ✗ |
+| 2.6 | 评审链（worker_done 后起不同模型 evaluator） | **P2，且在协调者工作流中，不在桥内** | ✗ | ✗ | ✗ |
 
 ## 3. 状态与幂等
 
@@ -129,9 +129,9 @@ PR/CI 状态卡与 digest（D `digest/*`、`github/*`——GitHub 自带 Slack a
 
 他的批注里定下来的原则：
 
-- **两环**（2.3）：外环 = Slack 线程里把需求聊清楚 → 产物是一张 Linear ticket；内环 = `stometa-mode` / `poteto-mode` 做开发和验证。桥派的是内环；外环需要一个"需求代理"角色——**这是清单里还没有的一行**，见下。
+- **两环**（2.3）：外环 = Slack 线程里把需求聊清楚 → 产物是一张 Linear ticket；内环 = 协调者和执行者工作流做开发和验证。桥派的是内环；外环需要一个"需求代理"角色——**这是清单里还没有的一行**，见下。
 - 入口不要很多频道（1.3）：一个频道，由模型按 mapping 判断上下文属于哪个 repo（和 1.6 一致；F 的 Haiku 推断 + 置信度阈值 + 低置信度弹确认按钮）。
-- 多厂商按 `stometa-mode` 路由表，不硬编码 Claude（2.4）。
+- 多厂商按协调者路由表，不硬编码 Claude（2.4）。
 - 账本必须有（3.2/3.3），跟进要排队（4.4），不建看板、依赖 Linear（8.3），PR 暂用他自己的 GitHub 身份（8.1 P1 不变，P0 用本人 gh）。
 
 他提的问题，我的回答：
@@ -143,7 +143,7 @@ PR/CI 状态卡与 digest（D `digest/*`、`github/*`——GitHub 自带 Slack a
 - **5.2 清理 worktree 会不会把 session 也清掉、没法 retro** → 会有影响：Claude Code 的 transcript 在 `~/.claude/projects/<按 cwd 路径哈希>/`，目录删了文件还在，但 `--resume` 按 cwd 找会话，worktree 没了就不好接（UNVERIFIED，要实测）；Codex 的在 `~/.codex/sessions/` 不依赖路径。方案：release 不删 worktree；按 5.7 的 14 天空闲再 `worktree rm`，删之前把 transcript 路径和 receipt 写进线程记录。
 - **6.6 为什么不能改规则和 hook** → 可以改 worktree 里的东西；但如果危险命令门是 worktree 里的一个 hook 文件，agent 改掉它就等于拆了门。所以门不放在 worktree 里：settings/hook 放 runner 的状态目录，启动时 `--settings` 传给 Claude（P 就这么做）。这样 6.6 不用禁，只要 6.3/6.4 的门放对地方。
 - **9.1 要不要换成本地 Docker image** → 不换。桥要调 `orca` CLI、开宿主机上的 worktree、读 keychain——放进 Docker 等于先隔离再把每个口子打回去。Mac runner 上 launchd 就是对的工具；runner 变成 Linux、`orca serve` 和桥同容器时再 Docker。
-- **1.5 不懂什么意思** → 路由表就是 `stometa-mode/SKILL.md:44-49` 那张表：每行 = 一种活（research / code / review）对应 agent + model + effort + skill。"角色前缀"是让人在 Slack 里写 `review: …` 直接选行。你选了 1.6 LLM 判意图之后，前缀就退化成可选的手动覆盖。
+- **1.5 不懂什么意思** → 路由表就是协调者配置中的那张表：每行 = 一种活（research / code / review）对应 agent + model + effort + skill。"角色前缀"是让人在 Slack 里写 `review: …` 直接选行。你选了 1.6 LLM 判意图之后，前缀就退化成可选的手动覆盖。
 
 新增一行待定：
 
@@ -160,7 +160,7 @@ PR/CI 状态卡与 digest（D `digest/*`、`github/*`——GitHub 自带 Slack a
 - 5.2 / 5.7 → 改为：PR 合并 + 人工确认验证后删除；无改动的 worktree 定时扫描后在 Slack 提醒，owner 点按钮才删，绝不静默删除；有改动的空闲 14 天只提醒。
 - 10.1 → 只考虑同一家公司；表述改为"一个 Slack app 对应一个 Bridge 实例"，不限制 worker 数量。
 
-## 待 Stometa 拍板（11-07 之前的版本，保留对照）
+## 待所有者拍板（11-07 之前的版本，保留对照）
 
 1. **1.4** issue/ticket 链接当任务源要不要？要的话 Linear/Jira 读取就进 P1，整个"tracker 边界"要重新说清楚。
 2. **1.6** 路由靠规则还是 LLM？F 做了 eval 说明它觉得规则不够。

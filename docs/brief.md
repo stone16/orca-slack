@@ -96,7 +96,7 @@ PR 状态来源：Bridge 账本记录每个 worktree 的 repo 和分支，每 60
 - Bridge 是唯一的 Orca Run 协调者，所有 agent 的回报都进 Bridge 的收件箱。子 agent 的汇报由 Bridge 转给当前 lead；需要人决定时发决定卡。
 - lead 的启动指令明确禁止直接派发 worker，只能向 Bridge 发结构化请求，否则 Orca 默认的子派发会绕过账本。
 - 子 agent 回报时：lead 有活跃 session 就转发；没有就在 lead 的 worktree 启动新 session 并带上这条回报。
-- Bridge 定期查询活跃派发。`projectionLiveness` 为 `unverifiable` 时先显示“状态未知”；若 `unverifiable` 与 `attention.requiresAction: true` 同时持续超过宽限窗口（默认 2 个轮询周期），且 `worker-read` 与 terminal read 的游标均无推进，状态卡转为“lead 已中断”；terminal read 明确返回 `exited` 也转为中断（M1 只显示，M2 加 [恢复]，见示例 17）。明确收到与该 Dispatch 对应的无回报结束 escalation（如 `stopReason: finished`）也显示中断。无输出本身不能证明中断，已确认的等人状态按决定卡处理；读取源变化时重置游标比较基线，永不自动重启。
+- Bridge 定期查询活跃派发。`projection.liveness.verdict` 为 `unverifiable` 时先显示“状态未知”；若 `unverifiable` 与 `projection.attention.requiresAction: true` 同时持续超过宽限窗口（默认 2 个轮询周期），且 `worker-read` 与 terminal read 的游标均无推进，状态卡转为“lead 已中断”；terminal read 明确返回 `exited` 也转为中断（M1 只显示，M2 加 [恢复]，见示例 17）。明确收到与该 Dispatch 对应的无回报结束 escalation（如 `stopReason: finished`）也显示中断。无输出本身不能证明中断，已确认的等人状态按决定卡处理；读取源变化时重置游标比较基线，永不自动重启。
 - 共享上下文在 Bridge 保存的线程记录里，新 session 启动时带上线程全文、ticket 和子 worktree 列表。
 
 ## 3. 示例
@@ -274,7 +274,7 @@ agent 只 push 代码，不在 GitHub 上回复或 resolve 评论。
 你：恢复 → 同一 worktree 启动新 lead，带线程全文、ticket 和子 worktree 列表
 ```
 
-短暂的 `projectionLiveness: unverifiable` 先显示“状态未知”。若 `unverifiable` 与 `attention.requiresAction: true` 同时持续超过宽限窗口（默认 2 个轮询周期），且 `worker-read` / terminal read 的游标都不再推进，则显示“lead 已中断”；terminal read 明确返回 `exited` 也转为中断；明确收到该 Dispatch 的无回报结束 escalation（如 `stopReason: finished`）也进入此状态。不能仅凭一次查询或无输出认定进程已退出，读取源变化时重置游标比较基线。
+短暂的 `projection.liveness.verdict: unverifiable` 先显示“状态未知”。若 `unverifiable` 与 `projection.attention.requiresAction: true` 同时持续超过宽限窗口（默认 2 个轮询周期），且 `worker-read` / terminal read 的游标都不再推进，则显示“lead 已中断”；terminal read 明确返回 `exited` 也转为中断；明确收到该 Dispatch 的无回报结束 escalation（如 `stopReason: finished`）也进入此状态。不能仅凭一次查询或无输出认定进程已退出，读取源变化时重置游标比较基线。
 
 owner 点 [恢复] 后，先用 `worker-stop` 或 `worker-abandon` 成功 fence 旧 Dispatch，再在同一 worktree 启动替代 session；`worker-abandon` 不证明旧进程已停止。永不自动重启；已在运行的子 agent 不动。
 
