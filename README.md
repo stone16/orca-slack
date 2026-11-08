@@ -59,3 +59,16 @@ Orca retains inert Run, Task, Dispatch, and message audit history.
 On an uncertain worker failure, the driver retains its disposable resources for exact recovery and exits unsuccessfully.
 
 The earlier prototype remains on branch `stone/p0-bridge`.
+
+## Route threads and manage leads
+
+Use [Leads](src/leads.ts#L16) with a [LeadCli](src/lead-orca.ts#L10), the existing Store, one Bridge-owned Run ID, configured repository IDs and aliases, bot ID, and agent ID. Pass that Leads instance as the final Bridge constructor argument. The existing inbound and permission handling remains the entry point.
+
+Call `leads.report(report)` from the ReportLoop delivery callback before rendering the report. Schedule `leads.poll()` to update durable lead events from Orca read evidence. Active sessions and unresolved questions are read from SQLite after restart. The [integration driver](scripts/lead-integration.mjs#L34) shows the composition with scripted Slack events and real Orca execution.
+
+```sh
+npm run build
+node scripts/lead-integration.mjs
+```
+
+The driver uses only a disposable repository, worktree, terminal, and Run. It asks one question, saves and answers the decision, receives completion, and removes its live resources. See the [acceptance evidence](docs/verification/2026-11-08-lead-routing.md) for the named tests, real IDs, and limits.

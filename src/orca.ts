@@ -12,9 +12,9 @@ export interface StartReceipt {
   effects?: { kind?: string; id?: string }[];
 }
 export class OrcaError extends Error {
-  constructor(message: string, readonly receipt: StartReceipt = {}) { super(message); }
+  constructor(message: string, readonly receipt: StartReceipt = {}, readonly code?: string) { super(message); }
 }
-export function parseEnvelope(output: string): { ok: boolean; result?: unknown; error?: { message?: string } } {
+export function parseEnvelope(output: string): { ok: boolean; result?: unknown; error?: { message?: string; code?: string } } {
   let start = -1, depth = 0, quoted = false, escaped = false;
   let last: ReturnType<typeof parseEnvelope> | undefined;
   for (let i = 0; i < output.length; i++) {
@@ -54,7 +54,7 @@ export class CliOrca implements Orca {
     catch { throw new OrcaError(`Orca ${verb} failed without a JSON receipt`); }
     if (failed || !envelope.ok) {
       const receipt = (envelope.result ?? {}) as StartReceipt;
-      throw new OrcaError(`${receipt.failedStage ?? receipt.stage ?? verb}: ${receipt.lastError ?? envelope.error?.message ?? 'command failed'}`, receipt);
+      throw new OrcaError(`${receipt.failedStage ?? receipt.stage ?? verb}: ${receipt.lastError ?? envelope.error?.message ?? 'command failed'}`, receipt, envelope.error?.code);
     }
     return envelope.result as T;
   }
@@ -84,3 +84,5 @@ export class CliOrca implements Orca {
     return value.messages as Message[];
   }
 }
+
+export { command };

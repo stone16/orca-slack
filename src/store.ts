@@ -26,6 +26,19 @@ export interface Inbound extends SlackEvent {
   key: string; threadId: string; kind: 'prompt' | 'stop' | 'archive'; state: 'pending' | 'forwarded' | 'archived';
 }
 
+export interface RoutingSample {
+  threadId: string; text: string; repository: string | null;
+  intent: 'question' | 'clarify' | 'implement'; rule: string;
+}
+export interface LeadEvent {
+  threadId: string; key: string; kind: 'routed' | 'repository-required' | 'started' | 'waiting' | 'answered' |
+    'completed' | 'failed' | 'stopped' | 'unknown' | 'interrupted' | 'running';
+  text: string; sessionId?: string;
+}
+export interface LeadObservation {
+  sessionId: string; source: string; cursor: string; terminalSource: string; terminalCursor: string; frozen: number;
+}
+
 export class Store {
   private db: DatabaseSync;
   constructor(file: string) {
@@ -61,6 +74,18 @@ export class Store {
         kind TEXT NOT NULL CHECK(kind IN ('prompt', 'stop', 'archive')),
         state TEXT NOT NULL CHECK(state IN ('pending', 'forwarded', 'archived')),
         UNIQUE(installationId, eventId));`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS routing_samples (
+        threadId TEXT PRIMARY KEY REFERENCES threads(id), text TEXT NOT NULL, repository TEXT,
+        intent TEXT NOT NULL, rule TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS lead_events (
+        threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, kind TEXT NOT NULL,
+        text TEXT NOT NULL, sessionId TEXT, PRIMARY KEY(threadId, key));
+      CREATE TABLE IF NOT EXISTS lead_observations (
+        sessionId TEXT PRIMARY KEY REFERENCES lead_sessions(id), source TEXT NOT NULL, cursor TEXT NOT NULL,
+        terminalSource TEXT NOT NULL, terminalCursor TEXT NOT NULL, frozen INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS lead_launches (
+        threadId TEXT PRIMARY KEY REFERENCES threads(id), id TEXT NOT NULL, dispatchId TEXT);`);
   }
   private transaction<T>(work: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -198,6 +223,67 @@ export class Store {
     this.db.prepare(`UPDATE inbound SET state='archived' WHERE threadId=? AND kind='prompt' AND state='pending'
       AND (? IS NULL OR rowid <= (SELECT rowid FROM inbound WHERE key=? AND threadId=?))`)
       .run(threadId, throughKey ?? null, throughKey ?? null, threadId);
+  }
+  saveRoutingSample(sample: RoutingSample): boolean {
+    return this.db.prepare('INSERT OR IGNORE INTO routing_samples VALUES (?, ?, ?, ?, ?)')
+      .run(sample.threadId, sample.text, sample.repository, sample.intent, sample.rule).changes === 1;
+  }
+  routingSamples(threadId: string): RoutingSample[] {
+    return this.db.prepare('SELECT * FROM routing_samples WHERE threadId=?').all(threadId) as unknown as RoutingSample[];
+  }
+  activeLeads(): LeadSession[] {
+    return this.db.prepare('SELECT * FROM lead_sessions WHERE active=1 ORDER BY rowid').all()
+      .map(row => ({ ...row, active: true })) as unknown as LeadSession[];
+  }
+  recordLeadEvent(event: LeadEvent, endSessionId?: string, decision?: Omit<Decision, 'answer' | 'answeredBy'>): void {
+    this.transaction(() => {
+      const inserted = this.db.prepare('INSERT OR IGNORE INTO lead_events VALUES (?, ?, ?, ?, ?)')
+        .run(event.threadId, event.key, event.kind, event.text, event.sessionId ?? null).changes;
+      if (!inserted) return;
+      if (decision) this.saveDecision(decision);
+      if (endSessionId) this.endLead(endSessionId);
+    });
+  }
+  leadEvents(threadId: string): LeadEvent[] {
+    return this.db.prepare('SELECT * FROM lead_events WHERE threadId=? ORDER BY rowid').all(threadId)
+      .map(({ sessionId, ...row }) => ({ ...row, ...(sessionId === null ? {} : { sessionId }) })) as unknown as LeadEvent[];
+  }
+  leadObservation(sessionId: string): LeadObservation | undefined {
+    return this.db.prepare('SELECT * FROM lead_observations WHERE sessionId=?').get(sessionId) as unknown as LeadObservation | undefined;
+  }
+  saveLeadObservation(observation: LeadObservation): void {
+    this.db.prepare(`INSERT INTO lead_observations VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(sessionId)
+      DO UPDATE SET source=excluded.source, cursor=excluded.cursor, terminalSource=excluded.terminalSource,
+      terminalCursor=excluded.terminalCursor, frozen=excluded.frozen`)
+      .run(observation.sessionId, observation.source, observation.cursor, observation.terminalSource,
+        observation.terminalCursor, observation.frozen);
+  }
+  pendingLaunch(threadId: string): string | undefined {
+    return this.db.prepare('SELECT id FROM lead_launches WHERE threadId=?').get(threadId)?.id as string | undefined;
+  }
+  beginLeadLaunch(threadId: string, id: string): void {
+    this.db.prepare('INSERT INTO lead_launches VALUES (?, ?, NULL)').run(threadId, id);
+  }
+  saveLaunchDispatch(threadId: string, dispatchId: string): void {
+    this.db.prepare('UPDATE lead_launches SET dispatchId=? WHERE threadId=?').run(dispatchId, threadId);
+  }
+  launchDispatch(threadId: string): string | undefined {
+    return this.db.prepare('SELECT dispatchId FROM lead_launches WHERE threadId=?').get(threadId)?.dispatchId as string | undefined;
+  }
+  finishLeadLaunch(threadId: string): void {
+    this.db.prepare('DELETE FROM lead_launches WHERE threadId=?').run(threadId);
+  }
+  pendingLeadDecisions(threadId: string): Decision[] {
+    return this.db.prepare(`SELECT d.id FROM decisions d JOIN lead_events e ON d.id=e.key AND d.threadId=e.threadId
+      JOIN lead_sessions s ON s.id=e.sessionId AND s.active=1
+      WHERE d.threadId=? AND d.answer IS NULL AND e.kind='waiting' ORDER BY e.rowid`).all(threadId)
+      .map(row => this.decision(row.id as string)!);
+  }
+  answerLeadDecision(id: string, answer: string, user: string): boolean {
+    const decision = this.decision(id);
+    if (!decision || (decision.options.length > 0 && !decision.options.includes(answer))) return false;
+    return this.db.prepare('UPDATE decisions SET answer=?, answeredBy=? WHERE id=? AND answer IS NULL')
+      .run(answer, user, id).changes === 1;
   }
   close(): void { this.db.close(); }
 }

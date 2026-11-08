@@ -1,3 +1,4 @@
+import type { Leads } from './leads.js';
 import type { Orca } from './orca.js';
 import { Store, type SlackEvent } from './store.js';
 
@@ -11,7 +12,7 @@ export class Bridge {
   constructor(private orca: Orca,
     private slack: { refuse(channel: string, user: string): Promise<void>; ownerAction(action: Action): Promise<void> },
     private store: Store, private allowedUsers: readonly string[], private botId: string,
-    private afterSave: () => void | Promise<void> = () => {}) {}
+    private afterSave: () => void | Promise<void> = () => {}, private leads?: Leads) {}
 
   async event(event: SlackEvent): Promise<void> {
     if (event.botMessage || event.user === this.botId) return;
@@ -44,6 +45,11 @@ export class Bridge {
   }
   private async stop(threadId: string, messageKey?: string): Promise<void> {
     this.store.archivePendingPrompts(threadId, messageKey);
+    if (this.leads) {
+      await this.leads.stop(threadId);
+      if (messageKey) this.store.markInboundForwarded(messageKey);
+      return;
+    }
     const lead = this.store.leadSessions(threadId).find(session => session.active);
     if (lead) {
       await this.orca.call('worker-stop', ['--dispatch', lead.dispatchId]);
@@ -55,6 +61,7 @@ export class Bridge {
     for (const message of this.store.inbound(threadId)) {
       if (message.state === 'pending' && message.kind === 'stop') await this.stop(threadId, message.key);
     }
+    if (this.leads) return this.leads.forward(threadId);
     for (const message of this.store.inbound(threadId)) {
       if (message.state !== 'pending') continue;
       const lead = this.store.leadSessions(message.threadId).find(session => session.active);
@@ -76,6 +83,7 @@ export class Bridge {
       if (action.actionId === 'stop') {
         await this.stop(thread.id);
       } else if (action.actionId === 'decision') {
+        if (this.leads) return this.leads.answer(thread.id, action.decisionId, action.option, action.user);
         const decision = this.store.decision(action.decisionId);
         if (!lead || !decision || decision.threadId !== thread.id || decision.answer !== undefined ||
             !decision.options.includes(action.option)) return false;

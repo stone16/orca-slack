@@ -37,3 +37,8 @@ test.each([
   const orca = new CliOrca(async () => ({ stdout: JSON.stringify({ ok: true, result }) }));
   await expect(orca.inbox('run')).rejects.toThrow(/Invalid/);
 });
+
+test('Orca transport preserves structured read error codes', async () => {
+  const orca = new CliOrca(async () => ({ stdout: '{"ok":false,"error":{"code":"source_changed","message":"Cursor source differs"}}' }));
+  await expect(orca.call('worker-read')).rejects.toMatchObject({ code: 'source_changed' });
+});
