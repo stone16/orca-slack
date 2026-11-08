@@ -1,6 +1,6 @@
 # orca-slack
 
-Slack thread ⇄ [Orca](https://onorca.dev) orchestration bridge. One thread = one task = one worktree = one PR.
+Slack thread ⇄ [Orca](https://onorca.dev) orchestration bridge. One requirement = one thread = one worktree = one PR; questions that change no code need no worktree.
 
 A small always-on process on the machine that runs Orca: it listens to Slack (Socket Mode), starts an Orca coordinator per thread with `orca orchestration worker-start`, relays the coordinator's questions and reports back into the thread, and lets the thread stop it. No board, no tracker, no agent mesh.
 

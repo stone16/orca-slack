@@ -151,6 +151,15 @@ PR/CI 状态卡与 digest（D `digest/*`、`github/*`——GitHub 自带 Slack a
 |---|---|---|---|
 | 1.8 | **外环：需求代理**——线程里和人把需求聊清楚，产出 Linear ticket（含可执行验收），再派内环 | ❓ | 2.3 批注直接推出来的；是桥派一个"spec 角色"的 worker 来聊，还是桥外的 Grok Bot/Slack 人工聊好再 @？决定了 1.4 的答案 |
 
+## 2026-11-08 对齐结果
+
+详见 `docs/features.md` §2026-11-08 对齐。
+
+- 1.8 → **定**：Router 只分类；Spec worker 在线程里和人聊，产出 ticket；Spec 阶段就建 worktree，实现 dispatch 复用它。
+- 2.2 → 一需求一 worktree，10 个需求 10 个 worktree；不做 quick-lane。
+- 5.2 / 5.7 → 改为：PR 合并 + 人工确认验证后删除；无改动的 worktree 定时扫描后在 Slack 提醒，owner 点按钮才删，绝不静默删除；有改动的空闲 14 天只提醒。
+- 10.1 → 只考虑同一家公司；表述改为"一个 Slack app 对应一个 Bridge 实例"，不限制 worker 数量。
+
 ## 待 Stometa 拍板（11-07 之前的版本，保留对照）
 
 1. **1.4** issue/ticket 链接当任务源要不要？要的话 Linear/Jira 读取就进 P1，整个"tracker 边界"要重新说清楚。

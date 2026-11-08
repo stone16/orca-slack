@@ -144,3 +144,34 @@ P1 变化：1.6 LLM 判意图 + eval（先用 P0 收样本）· 1.7 owner DM 入
 先不定：1.4 ticket 当任务源（取决于 1.8）· 6.6 · 7.2 成本上限 · **1.8 外环需求代理**（新）。
 
 原则：两环（外环聊需求 → Linear ticket；内环 stometa-mode/poteto-mode）· 一个频道 + 模型按 mapping 选 repo · 多厂商按 stometa-mode 路由表 · SQLite 不换 Postgres · 不另建 queue · launchd 不换 Docker · PR 暂用本人 gh 身份。
+
+## 2026-11-08 对齐：worktree 生命周期与架构
+
+本节覆盖上文冲突的内容（"一线程 = 一 worktree"、5.7 的 14 天空闲关闭、#19 一公司一进程）。
+
+- **范围**：只考虑同一家公司，不设计多公司隔离；#19 和多租户问题搁置。
+- **运行位置**：专门的机器长期运行。
+- **一需求一 worktree**：一个需求 = 一个线程 = 一个 worktree = 一个 PR；10 个需求就是 10 个 worktree。同一需求的跟进在自己的 worktree 里开新 session。纯提问不建 worktree。
+- **不做** per-repo quick-lane，也不在 repo 主 checkout 里写代码。
+- **Router 不对话**：只在线程开始时跑一次分类，输出 repo / 档位 / 角色 / 置信度。
+- **上下文共享靠 Bridge**：Bridge 保存线程全文；启动任何 worker 时写进 spec，后续消息继续转发。
+- **Spec 阶段就建 worktree**：Spec worker 和实现 worker 用同一个 worktree、不同 dispatch，交接物是线程全文 + ticket + worktree 文件。
+- **一个 Slack app 对应一个 Bridge 实例**：原因是 `check` 消费消息，不能有两个消费者；这不限制 worker 数量。
+
+### Worktree 清理
+
+| 情况 | 触发 | 行为 |
+|---|---|---|
+| 已交付 | PR 合并后，状态卡上点"已验证，清理" | 检查通过后删除 |
+| 空 worktree | 每日定时扫描，**无改动**且超过 N 天 | 在 Slack 提醒 owner，给"清理 / 保留"按钮；点"清理"且检查通过后才删除，**绝不静默删除** |
+| 有改动但没走完 | 空闲 14 天 | 只提醒，不删 |
+
+**无改动**必须同时满足：`git status --porcelain` 为空；相对 base 没有新提交；没有关联 PR；没有运行中的 worker；没有未回答的 question。
+
+删除前把 transcript 路径和 receipt 写进线程记录；删除不使用 force。任一条件拿不准就视为有改动。
+
+**提醒**：每天最多一条汇总消息，只在出现新的待清理项时发送。每项写明需求名、线程链接、闲置天数、为什么判定为无改动，并带"清理 / 保留"按钮；另有"全部清理"。点"保留"的项重新开始计算 N 天。没有人回应时不删除。
+
+**限制**：无改动 worktree 的数量设上限，达到上限后新的 Spec 请求要先提示清理，并列出待清理项。上限只管这一类，不改变 7.3 的"并发不限"。
+
+默认值（可配置）：N = 3 天；上限 = 20 个。
