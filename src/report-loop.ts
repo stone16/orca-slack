@@ -44,7 +44,6 @@ export class ReportLoop {
   private async flush(): Promise<void> {
     for (const report of this.store.reports(this.runId)) {
       if (report.state === 'sent') continue;
-      if (report.sequence === undefined) throw new Error(`Report missing inbox sequence: ${report.id}`);
       await this.send(report);
       await this.checkpoint('after-send');
       this.store.markReportSent(this.runId, report.id);
