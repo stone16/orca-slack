@@ -10,7 +10,7 @@ import { CliOrca } from '../src/orca.js';
 import { LeadCli } from '../src/lead-orca.js';
 import { Leads } from '../src/leads.js';
 import { transpileModule, ModuleKind, ScriptTarget } from 'typescript';
-import { makeArchive } from './archive-volume.js';
+import { archiveFiles, makeArchive } from './archive-volume.js';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -66,7 +66,7 @@ test('a failed archive write leaves the local transcript intact without publishi
   expect(threads.archiveExpired(32 * day)).toEqual({ archived: [],
     retained: [{ id: thread.id, reason: 'ENOSPC' }] });
   expect(JSON.parse(readFileSync(local, 'utf8'))).toEqual({ thread, messages: [large], updatedAt: day });
-  expect(readdirSync(archiveDirectory)).toEqual([]);
+  expect(archiveFiles(archiveDirectory)).toEqual([]);
 }, 15_000);
 
 test('an absent archive keeps the local record and retries when the directory becomes available', () => {
@@ -91,7 +91,7 @@ test('reactivating an archived thread restores all content before accepting a ne
   threads.archiveExpired(32 * day);
   threads = new UnboundThreads({ checkout: root, archiveDirectory });
   expect(threads.reactivate(thread.id, 33 * day)).toEqual({ thread, messages: [event], updatedAt: 33 * day });
-  expect(readdirSync(archiveDirectory)).toEqual([]);
+  expect(archiveFiles(archiveDirectory)).toEqual([]);
   expect(new UnboundThreads({ checkout: root }).read(thread.id)?.messages).toEqual([event]);
   const followup = { ...event, eventId: 'event-2', ts: '2.0', threadTs: '1.0', text: 'Continue this idea' };
   threads.append(thread, followup, 33 * day);
@@ -135,7 +135,7 @@ test('appending directly to an archived thread keeps peer text and deduplicates 
   threads.append(thread, peer, 33 * day);
   threads.append(thread, { ...peer, eventId: 'dual-event' }, 33 * day);
   expect(threads.read(thread.id)?.messages).toEqual([event, peer]);
-  expect(readdirSync(archiveDirectory)).toEqual([]);
+  expect(archiveFiles(archiveDirectory)).toEqual([]);
 });
 
 test('without archive configuration an expired record stays local', () => {
@@ -156,7 +156,7 @@ test('an archive symlink to the local record cannot pass copy verification and l
   const local = join(root, 'data', 'threads', file);
   symlinkSync(local, join(archiveDirectory, file));
   expect(threads.archiveExpired(32 * day)).toEqual({ archived: [],
-    retained: [{ id: thread.id, reason: 'Archive verification failed' }] });
+    retained: [{ id: thread.id, reason: 'Invalid archive record' }] });
   expect(JSON.parse(readFileSync(local, 'utf8')).messages).toEqual([event]);
   expect(existsSync(local)).toBe(true);
 });
@@ -182,7 +182,7 @@ test('Bridge persists authorized unbound messages and reactivates the transcript
     await bridge.event({ ...reply, eventId: 'dual-reply' });
     await bridge.event({ ...reply, eventId: 'outsider', ts: '3.0', user: 'OUTSIDER' });
     expect(threads.read(thread.id)?.messages).toEqual([event, reply]);
-    expect(readdirSync(archiveDirectory)).toEqual([]);
+    expect(archiveFiles(archiveDirectory)).toEqual([]);
     expect(refused).toEqual(['OUTSIDER']);
     expect(commands).toEqual([]);
     store.saveWorktree({ id: 'tree', threadId: thread.id, repository: 'example/web', branch: 'feat/idea' });
@@ -203,7 +203,7 @@ test.each(['read', 'append', 'reactivate'] as const)('B2 %s merges archived hist
   mkdirSync(archiveDirectory);
   const reply = { ...event, eventId: 'reply', ts: '2.0', threadTs: '1.0', text: 'An offline reply' };
   threads.append({ ...thread, owner: 'U2' }, reply, 33 * day);
-  expect(readdirSync(archiveDirectory)).toEqual([]);
+  expect(archiveFiles(archiveDirectory)).toEqual([]);
   rmSync(archiveDirectory, { recursive: true });
   renameSync(offline, archiveDirectory);
   if (operation === 'append') threads.append({ ...thread, owner: 'U2' }, { ...reply, eventId: 'dual-reply' }, 34 * day);
@@ -212,7 +212,7 @@ test.each(['read', 'append', 'reactivate'] as const)('B2 %s merges archived hist
   expect(threads.read(thread.id)?.thread.owner).toBe('U2');
 });
 
-test('B3 an interrupted archive copy is preserved and replaced on a successful retry', () => {
+test('B3 an interrupted archive remains visible and retained until repaired', () => {
   const { root } = fixture();
   const archiveDirectory = join(root, 'archive');
   makeArchive(archiveDirectory);
@@ -221,10 +221,13 @@ test('B3 an interrupted archive copy is preserved and replaced on a successful r
   const [file] = readdirSync(join(root, 'data', 'threads'));
   const incomplete = '{"thread":';
   writeFileSync(join(archiveDirectory, file), incomplete);
-  expect(threads.archiveExpired(32 * day).archived).toEqual([thread.id]);
+  expect(threads.archiveExpired(32 * day)).toEqual({ archived: [],
+    retained: [{ id: thread.id, reason: 'Invalid archive record' }] });
   expect(threads.read(thread.id)?.messages).toEqual([event]);
-  expect(readdirSync(archiveDirectory).some(name => name !== file &&
-    readFileSync(join(archiveDirectory, name), 'utf8') === incomplete)).toBe(true);
+  expect(readFileSync(join(archiveDirectory, file), 'utf8')).toBe(incomplete);
+  expect(archiveFiles(archiveDirectory)).toEqual([file]);
+  writeFileSync(join(archiveDirectory, file), readFileSync(join(root, 'data', 'threads', file)));
+  expect(threads.archiveExpired(33 * day)).toEqual({ archived: [thread.id], retained: [] });
 });
 
 test('B3 retention merges an older valid archive before replacing it', () => {
@@ -251,7 +254,7 @@ test('B4 an unmounted local directory stub never receives archive data', () => {
   threads.append(thread, event, day);
   expect(threads.archiveExpired(32 * day)).toEqual({ archived: [],
     retained: [{ id: thread.id, reason: 'Archive is not mounted' }] });
-  expect(readdirSync(archiveDirectory)).toEqual([]);
+  expect(archiveFiles(archiveDirectory)).toEqual([]);
   expect(threads.read(thread.id)?.messages).toEqual([event]);
 });
 
@@ -268,7 +271,7 @@ test('S2 a freshly bound thread is excluded from the unbound retention sweep', (
     store.saveWorktree({ id: 'tree', threadId: thread.id, repository: 'example/web', branch: 'feat/idea' });
     expect(threads.archiveExpired(32 * day)).toEqual({ archived: [], retained: [] });
     expect(threads.read(thread.id)?.messages).toEqual([event]);
-    expect(readdirSync(archiveDirectory)).toEqual([]);
+    expect(archiveFiles(archiveDirectory)).toEqual([]);
   } finally { store.close(); }
 });
 
@@ -331,7 +334,7 @@ test('S2 Bridge observes later binding before retention without another Slack ev
     const cutoff = threads.read(thread.id)!.updatedAt + 31 * day;
     store.saveWorktree({ id: 'tree', threadId: thread.id, repository: 'example/web', branch: 'feat/idea' });
     expect(threads.archiveExpired(cutoff)).toEqual({ archived: [], retained: [] });
-    expect(readdirSync(archiveDirectory)).toEqual([]);
+    expect(archiveFiles(archiveDirectory)).toEqual([]);
   } finally { store.close(); }
 });
 
