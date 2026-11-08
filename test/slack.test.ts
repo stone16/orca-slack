@@ -199,3 +199,94 @@ test('a successful stop retires the lead session and preserves the thread and wo
     expect(store.worktrees('thread')).toHaveLength(1);
   } finally { store.close(); }
 });
+
+test('a stop received without an active lead is settled before a future lead starts', async () => {
+  const store = new Store(':memory:');
+  seed(store);
+  store.endLead('session');
+  const ports = boundary();
+  try {
+    const bridge = new Bridge(ports.orca, ports.slack, store, ['U1', 'U2'], 'BOT');
+    await bridge.event({ ...event, text: '!stop' });
+    store.replaceLead({ id: 'replacement', threadId: 'thread', worktreeId: 'tree', runId: 'run',
+      taskId: 'next-task', dispatchId: 'next-dispatch', handle: 'next-handle' });
+    await bridge.replay();
+    expect(ports.commands).toEqual([]);
+    expect(store.inbound('thread')[0].state).toBe('forwarded');
+    expect(store.leadSessions('thread').find(session => session.active)?.id).toBe('replacement');
+  } finally { store.close(); }
+});
+
+test.each(['message', 'button'])('a %s stop bypasses a failed prompt and cancels it before lead replacement', async source => {
+  const store = new Store(':memory:');
+  seed(store);
+  const ports = boundary();
+  const commands: string[][] = [];
+  const orca = new CliOrca(async args => {
+    commands.push(args);
+    return { stdout: args[1] === 'send' ? '{"ok":false,"error":{"message":"forward unavailable"}}'
+      : '{"ok":true,"result":{}}' };
+  });
+  try {
+    const bridge = new Bridge(orca, ports.slack, store, ['U1', 'U2'], 'BOT');
+    await expect(bridge.event(event)).rejects.toThrow('forward unavailable');
+    if (source === 'message') await bridge.event({ ...event, eventId: 'stop-event', ts: '3', text: '!stop' });
+    else expect(await bridge.action({ actionId: 'stop', threadId: 'thread', channel: 'C1', user: 'U2' })).toBe(true);
+    expect(commands.filter(args => args[1] === 'worker-stop')).toHaveLength(1);
+    expect(store.inbound('thread')[0].state).toBe('archived');
+    store.replaceLead({ id: 'replacement', threadId: 'thread', worktreeId: 'tree', runId: 'run',
+      taskId: 'next-task', dispatchId: 'next-dispatch', handle: 'next-handle' });
+    await bridge.replay();
+    expect(commands.filter(args => args[1] === 'send')).toHaveLength(1);
+    expect(store.leadSessions('thread').find(session => session.active)?.id).toBe('replacement');
+  } finally { store.close(); }
+});
+
+test.each(['event', 'startup replay'])('a failed thread forward does not block another thread during %s', async source => {
+  const store = new Store(':memory:');
+  seed(store);
+  store.saveThread({ id: 'other', channel: 'C1', threadTs: '10', owner: 'U2' });
+  store.saveWorktree({ id: 'other-tree', threadId: 'other', repository: 'example/api', branch: 'feat/export' });
+  store.replaceLead({ id: 'other-session', threadId: 'other', worktreeId: 'other-tree', runId: 'run',
+    taskId: 'other-task', dispatchId: 'other-dispatch', handle: 'other-handle' });
+  const ports = boundary();
+  const delivered: string[] = [];
+  const orca = new CliOrca(async args => {
+    if (args.includes('dispatch:dispatch')) return { stdout: '{"ok":false,"error":{"message":"first thread unavailable"}}' };
+    delivered.push(args[args.indexOf('--body') + 1]);
+    return { stdout: '{"ok":true,"result":{}}' };
+  });
+  try {
+    const bridge = new Bridge(orca, ports.slack, store, ['U1', 'U2'], 'BOT');
+    await expect(bridge.event(event)).rejects.toThrow('first thread unavailable');
+    const otherEvent = { ...event, eventId: 'other-event', ts: '11', threadTs: '10', user: 'U2', text: 'Other thread request' };
+    if (source === 'event') await bridge.event(otherEvent);
+    else {
+      store.saveInbound(store.thread('other')!, otherEvent, 'prompt');
+      await expect(bridge.replay()).rejects.toThrow('first thread unavailable');
+    }
+    expect(delivered).toEqual(['Other thread request']);
+    expect(store.inbound('thread')[0].state).toBe('pending');
+    expect(store.inbound('other')[0].state).toBe('forwarded');
+  } finally { store.close(); }
+});
+
+test('stop cancellation preserves a later prompt for the replacement lead', async () => {
+  const store = new Store(':memory:');
+  seed(store);
+  const ports = boundary();
+  try {
+    const thread = store.thread('thread')!;
+    store.saveInbound(thread, event, 'prompt');
+    store.saveInbound(thread, { ...event, eventId: 'stop-event', ts: '3', text: '!stop' }, 'stop');
+    store.saveInbound(thread, { ...event, eventId: 'later-event', ts: '4', text: 'A fresh request after stop' }, 'prompt');
+    const bridge = new Bridge(ports.orca, ports.slack, store, ['U1', 'U2'], 'BOT');
+    await bridge.replay();
+    expect(store.inbound('thread').map(message => message.state)).toEqual(['archived', 'forwarded', 'pending']);
+    store.replaceLead({ id: 'replacement', threadId: 'thread', worktreeId: 'tree', runId: 'run',
+      taskId: 'next-task', dispatchId: 'next-dispatch', handle: 'next-handle' });
+    await bridge.replay();
+    expect(ports.commands.filter(args => args[1] === 'send').map(args => args[args.indexOf('--body') + 1]))
+      .toEqual(['A fresh request after stop']);
+  } finally { store.close(); }
+});

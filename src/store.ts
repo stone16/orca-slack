@@ -194,5 +194,10 @@ export class Store {
   markInboundForwarded(key: string): void {
     this.db.prepare("UPDATE inbound SET state='forwarded' WHERE key=? AND state='pending'").run(key);
   }
+  archivePendingPrompts(threadId: string, throughKey?: string): void {
+    this.db.prepare(`UPDATE inbound SET state='archived' WHERE threadId=? AND kind='prompt' AND state='pending'
+      AND (? IS NULL OR rowid <= (SELECT rowid FROM inbound WHERE key=? AND threadId=?))`)
+      .run(threadId, throughKey ?? null, throughKey ?? null, threadId);
+  }
   close(): void { this.db.close(); }
 }
