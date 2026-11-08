@@ -2,9 +2,9 @@
 
 Slack thread ⇄ [Orca](https://onorca.dev) orchestration bridge. One piece of work = one Slack thread with one lead agent, which can drive several worktrees and PRs; see docs/brief.md.
 
-A small always-on process on the machine that runs Orca: it listens to Slack (Socket Mode), starts an Orca coordinator per thread with `orca orchestration worker-start`, relays the coordinator's questions and reports back into the thread, and lets the thread stop it. No board, no tracker, no agent mesh.
+The Bridge runs on the machine that runs Orca. Slack is the entry and reporting surface; Orca runs the agents. The product behavior is defined in [docs/brief.md](docs/brief.md).
 
-Status: requirements aligned, tech spec in progress, P0 code exists on a side branch and has not run against a live Slack app yet.
+Status: M1 slice 1 provides the tested TypeScript core with scripted Slack delivery. Live Slack integration and deployment remain for milestone acceptance.
 
 - Product brief, the baseline for what we build: [docs/brief.md](docs/brief.md)
 - Requirements and priorities: [docs/features.md](docs/features.md)
@@ -23,11 +23,39 @@ Before writing anything we read the source of three open Slack→Orca bridges an
 
 Where a referenced project has no licence, we treated it as all-rights-reserved: design observations only, cited by file and line in `docs/feature-matrix.md`, nothing reused.
 
-## Layout
+## Develop the core
 
-```
-docs/features.md         requirement list (P0 / P1 / P2 / not doing) and lessons folded in
-docs/feature-matrix.md   64 feature points × us × three references, with decisions
+Node.js 24 or newer is required.
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run build
 ```
 
-The P0 implementation lives on branch `stone/p0-bridge` until the tech spec settles.
+[Store](src/store.ts#L29) uses `node:sqlite` for threads, worktrees, pull requests, lead sessions, decisions, and delivery records.
+[Bridge](src/slack.ts#L16) saves inbound Slack messages before forwarding and gates actions by allowlist and owner.
+The caller supplies normalized Slack events, refusal delivery, and the authorized retry, cleanup, and repository-switch handlers.
+
+Use one [ReportLoop](src/report-loop.ts#L7) per Orca Run and one Bridge instance per Slack app.
+At startup, call `ReportLoop.recover()` and `Bridge.replay()` before scheduling `ReportLoop.poll()`.
+The report sender receives a durable report and resolves after the downstream send succeeds.
+A crash after send and before its sent marker can repeat that report on recovery.
+A known inbox coverage gap stays recorded in `Store.coverage(runId)`.
+
+## Check the real Orca boundary
+
+With Orca running and its default Codex agent available:
+
+```sh
+npm run test:orca
+```
+
+[The integration driver](scripts/orca-integration.mjs#L98) creates a temporary repository, an authenticated Bridge terminal, one Run, and one trivial worker.
+It sends reports to a local sink and prints message ids, inbox sequence, and cleanup evidence.
+It releases the worker, closes its terminal, deregisters its repository, removes temporary files, and compares repository/worktree membership.
+Orca retains inert Run, Task, Dispatch, and message audit history.
+On an uncertain worker failure, the driver retains its disposable resources for exact recovery and exits unsuccessfully.
+
+The earlier prototype remains on branch `stone/p0-bridge`.

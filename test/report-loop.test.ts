@@ -167,3 +167,13 @@ test('overlapping polls on the sole report consumer do not send a report twice',
     expect(sent).toEqual(['report']);
   } finally { store.close(); }
 });
+
+test('the oldest message id without its inbox sequence does not establish full-page coverage', async () => {
+  const store = new Store(':memory:');
+  const scripted = new ScriptedOrca();
+  for (let i = 0; i < 1000; i++) scripted.add(`message-${i}`);
+  store.persistReports('run', [{ id: 'message-0', type: 'worker_done' }]);
+  try {
+    expect((await new ReportLoop(scripted.client, store, 'run', async () => {}).reconcile()).state).toBe('gap');
+  } finally { store.close(); }
+});
