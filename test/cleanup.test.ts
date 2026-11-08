@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
 import { Cleanup } from '../src/cleanup.js';
+import { PrPoller } from '../src/pr-poller.js';
 import type { RunCommand } from '../src/commands.js';
 import { Store } from '../src/store.js';
 
@@ -74,7 +75,7 @@ test.each([
 ] as const)('cleanup availability matrix: %s', async (_name, states, agents, allowed) => {
   const f = fixture();
   f.state.prs = states.map((state, i) => ({ ...pr, number: 12 + i,
-    url: `https://github.com/example/web/pull/${12 + i}`, state }));
+    url: `https://github.com/example/web/pull/${12 + i}`, state, headRefOid: i === 0 && states.length > 1 ? 'b'.repeat(40) : head }));
   f.state.agents = agents.map(liveness => ({ liveness }));
   expect((await new Cleanup(f.store, f.run).check(f.tree.id)).allowed).toBe(allowed);
   expect(f.calls.some(([program, args]) => program === 'orca' && args[1] === 'rm')).toBe(false);
@@ -127,6 +128,7 @@ test('Git or Orca inspection failures retain the worktree and do not fabricate a
 
 test('confirmed cleanup durably saves the receipt, PR link, final commit, and session report before deletion', async () => {
   const f = fixture();
+  await new PrPoller(f.store, f.run).poll();
   f.store.replaceLead({ id: 'session', threadId: 'thread', worktreeId: f.tree.id,
     runId: 'run', taskId: 'task', dispatchId: 'dispatch', handle: 'handle' });
   f.store.endLead('session');
@@ -297,9 +299,59 @@ test.each(['OPEN', 'MERGED'])('another worktree must have merged PRs and ended a
 
 test('a fresh gh failure cannot authorize cleanup from a previously merged cached state', async () => {
   const f = fixture();
+  await new PrPoller(f.store, f.run).poll();
   const cleanup = new Cleanup(f.store, f.run);
   expect((await cleanup.check(f.tree.id)).allowed).toBe(true);
   f.state.ghFailed = true;
   expect(await cleanup.check(f.tree.id)).toEqual({ allowed: false, reasons: ['GitHub state unknown'] });
   expect(f.store.observedPullRequests('thread')[0].state).toBe('MERGED');
+});
+
+test.each(['opening', 'merge'])('cleanup inspection leaves the %s change for the periodic poller', async transition => {
+  const f = fixture();
+  const poller = new PrPoller(f.store, f.run);
+  f.state.prs = transition === 'opening' ? [] : [{ ...pr, state: 'OPEN' }];
+  await poller.poll();
+  f.state.prs = [{ ...pr, state: transition === 'opening' ? 'OPEN' : 'MERGED' }];
+  await new Cleanup(f.store, f.run).check(f.tree.id);
+  expect((await poller.poll()).changes).toEqual([
+    { ...f.state.prs[0], id: pr.url, worktreeId: f.tree.id },
+  ]);
+});
+
+test.each([false, true])('cleanup requires the latest merged PR head when local HEAD is older (%s)', async older => {
+  const f = fixture();
+  const latestHead = 'b'.repeat(40);
+  f.state.prs = [{ ...pr, number: 13, url: 'https://github.com/example/web/pull/13', headRefOid: latestHead }, pr];
+  f.state.head = older ? head : latestHead;
+  const result = await new Cleanup(f.store, f.run).check(f.tree.id);
+  if (older) expect(result).toEqual({ allowed: false, reasons: ['HEAD differs from merged pull request head commit'] });
+  else expect(result).toMatchObject({ allowed: true, finalCommit: latestHead });
+});
+
+test('a stale merged PR omitted from fresh GitHub results cannot authorize cleanup', async () => {
+  const f = fixture();
+  await new PrPoller(f.store, f.run).poll();
+  f.state.prs = [];
+  expect(await new Cleanup(f.store, f.run).check(f.tree.id)).toEqual({ allowed: false, reasons: ['No merged pull request'] });
+});
+
+test('a worktree without a merged PR reports that reason even when a sibling has merged', async () => {
+  const f = fixture();
+  f.state.prs = [];
+  f.store.saveWorktree({ id: 'api-tree', threadId: 'thread', repository: 'example/api', branch: 'feat/api' });
+  const run: RunCommand = async (program, args) => {
+    if (program === 'gh' && args.includes('example/api')) return JSON.stringify([
+      { ...pr, url: 'https://github.com/example/api/pull/12' },
+    ]);
+    const output = await f.run(program, args);
+    if (program === 'orca' && args[1] === 'ps') {
+      const envelope = JSON.parse(output);
+      envelope.result.worktrees.push({ worktreeId: 'api-tree', worktreeInstanceId: 'api-instance', hostId: 'local',
+        agents: [], unverifiableTerminalCount: 0 });
+      return JSON.stringify(envelope);
+    }
+    return output;
+  };
+  expect(await new Cleanup(f.store, run).check(f.tree.id)).toEqual({ allowed: false, reasons: ['No merged pull request'] });
 });

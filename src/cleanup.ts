@@ -3,7 +3,7 @@ import { lstatSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { runCommand, type RunCommand } from './commands.js';
 import { parseEnvelope } from './orca.js';
-import { PrPoller } from './pr-poller.js';
+import { queryPullRequests } from './pr-poller.js';
 import { Store, type Worktree, type ObservedPullRequest, type CleanupReceipt } from './store.js';
 
 interface AgentInventory {
@@ -18,12 +18,9 @@ export type CleanupCheck = { allowed: false; reasons: string[] } | ({ allowed: t
 export type CleanupResult = { status: 'refused'; reasons: string[] } |
   { status: 'deleted' | 'already-deleted'; receipt: CleanupReceipt };
 export class Cleanup {
-  private poller: PrPoller;
   private queues = new Map<string, Promise<CleanupResult>>();
   constructor(private store: Store, private run: RunCommand = runCommand,
-    private checkpoint: (step: 'after-save' | 'after-delete') => void | Promise<void> = () => {}) {
-    this.poller = new PrPoller(store, run);
-  }
+    private checkpoint: (step: 'after-save' | 'after-delete') => void | Promise<void> = () => {}) {}
   private async orca<T>(args: string[]): Promise<T> {
     const envelope = parseEnvelope(await this.run('orca', [...args, '--json']));
     if (!envelope.ok) throw new Error('Orca command failed');
@@ -46,11 +43,18 @@ export class Cleanup {
   async check(worktreeId: string): Promise<CleanupCheck> {
     const tree = this.store.trackedWorktrees().find(tree => tree.id === worktreeId);
     if (!tree) return { allowed: false, reasons: ['Unknown worktree'] };
-    const polled = await this.poller.poll(tree.threadId);
-    if (polled.failures.length) return { allowed: false, reasons: ['GitHub state unknown'] };
-    const prs = this.store.observedPullRequests(tree.threadId);
-    if (!prs.some(pr => pr.state === 'MERGED')) return { allowed: false, reasons: ['No merged pull request'] };
-    if (prs.some(pr => pr.state !== 'MERGED') || prs.length !== this.store.pullRequests(tree.threadId).length) {
+    const known = this.store.pullRequests(tree.threadId);
+    const prs: ObservedPullRequest[] = [];
+    try {
+      for (const worktree of this.store.trackedWorktrees(tree.threadId)) {
+        prs.push(...(await queryPullRequests(worktree, this.run)).map(pr => ({ ...pr,
+          id: known.find(saved => saved.url === pr.url && saved.worktreeId === pr.worktreeId)?.id ?? pr.id })));
+      }
+    } catch { return { allowed: false, reasons: ['GitHub state unknown'] }; }
+    const pullRequests = prs.filter(pr => pr.worktreeId === tree.id).sort((a, b) => a.number - b.number);
+    if (!pullRequests.some(pr => pr.state === 'MERGED')) return { allowed: false, reasons: ['No merged pull request'] };
+    if (prs.some(pr => pr.state !== 'MERGED') || known.some(saved =>
+        !prs.some(pr => pr.url === saved.url && pr.worktreeId === saved.worktreeId))) {
       return { allowed: false, reasons: ['Unmerged or unknown pull request'] };
     }
     if (this.store.leadSessions(tree.threadId).some(session => session.active)) {
@@ -95,8 +99,7 @@ export class Cleanup {
       }
       if ((await git(['stash', 'list', '--format=%gd'])).trim()) reasons.push('Stash present');
       const finalCommit = (await git(['rev-parse', '--verify', 'HEAD'])).trim();
-      const pullRequests = prs.filter(pr => pr.worktreeId === tree.id);
-      if (!pullRequests.some(pr => pr.headRefOid === finalCommit)) reasons.push('HEAD differs from merged pull request head commit');
+      if (pullRequests.at(-1)!.headRefOid !== finalCommit) reasons.push('HEAD differs from merged pull request head commit');
       if (reasons.length) return { allowed: false, reasons };
       return { allowed: true, reasons: [], worktree: tree, instanceId, identity, path, pullRequests, finalCommit };
     } catch { return { allowed: false, reasons: ['Git safety check failed'] }; }

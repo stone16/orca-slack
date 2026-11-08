@@ -1,5 +1,5 @@
 import { runCommand, type RunCommand } from './commands.js';
-import { Store, type ObservedPullRequest } from './store.js';
+import { Store, type ObservedPullRequest, type Worktree } from './store.js';
 
 export interface PollResult { changes: ObservedPullRequest[]; failures: { worktreeId: string; reason: string }[] }
 export class PrPoller {
@@ -20,19 +20,24 @@ export class PrPoller {
     const result: PollResult = { changes: [], failures: [] };
     for (const tree of this.store.trackedWorktrees(threadId)) {
       try {
-        const output = await this.run('gh', ['pr', 'list', '--repo', tree.repository, '--head', tree.branch.replace(/^refs\/heads\//, ''),
-          '--state', 'all', '--limit', '1000', '--json', 'number,url,state,headRefOid']);
-        const prs = JSON.parse(output) as Omit<ObservedPullRequest, 'id' | 'worktreeId'>[];
-        if (!Array.isArray(prs) || prs.length >= 1000 || prs.some(pr => !pr ||
-            !Number.isSafeInteger(pr.number) || pr.number <= 0 ||
-            typeof pr.url !== 'string' || !/^https:\/\/[^\s/]+\/.+\/pull\/\d+$/.test(pr.url) ||
-            !['OPEN', 'CLOSED', 'MERGED'].includes(pr.state) ||
-            typeof pr.headRefOid !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(pr.headRefOid))) {
-          throw new Error('Invalid or incomplete pull request list');
-        }
-        result.changes.push(...this.store.observePullRequests(prs.map(pr => ({ ...pr, id: pr.url, worktreeId: tree.id }))));
+        result.changes.push(...this.store.observePullRequests(await queryPullRequests(tree, this.run)));
       } catch { result.failures.push({ worktreeId: tree.id, reason: 'GitHub poll failed' }); }
     }
     return result;
   }
+}
+
+export async function queryPullRequests(tree: Worktree, run: RunCommand): Promise<ObservedPullRequest[]> {
+  const output = await run('gh', ['pr', 'list', '--repo', tree.repository, '--head', tree.branch.replace(/^refs\/heads\//, ''),
+    '--state', 'all', '--limit', '1000', '--json', 'number,url,state,headRefOid']);
+  const prs = JSON.parse(output) as Omit<ObservedPullRequest, 'id' | 'worktreeId'>[];
+  if (!Array.isArray(prs) || prs.length >= 1000 || prs.some(pr => !pr ||
+      !Number.isSafeInteger(pr.number) || pr.number <= 0 ||
+      typeof pr.url !== 'string' || !/^https:\/\/[^\s/]+\/.+\/pull\/\d+$/.test(pr.url) ||
+      !['OPEN', 'CLOSED', 'MERGED'].includes(pr.state) ||
+      typeof pr.headRefOid !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(pr.headRefOid))) {
+    throw new Error('Invalid or incomplete pull request list');
+  }
+  return prs.map(pr => ({ id: pr.url, worktreeId: tree.id, url: pr.url,
+    number: pr.number, state: pr.state, headRefOid: pr.headRefOid }));
 }
