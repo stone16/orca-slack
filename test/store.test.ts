@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -97,5 +98,37 @@ test('saving a PR link cannot give the same URL to another worktree under a new 
     store.savePullRequest({ id: 'legacy-pr', worktreeId: 'first', url });
     expect(() => store.savePullRequest({ id: 'duplicate', worktreeId: 'second', url })).toThrow(/UNIQUE/);
     expect(store.pullRequests('thread')).toEqual([{ id: 'legacy-pr', worktreeId: 'first', url }]);
+  } finally { store.close(); }
+});
+
+test('B1 launch cutoffs preserve legacy rows and the original launch table shape', () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-legacy-launch-')); roots.push(root);
+  const file = join(root, 'ledger.sqlite');
+  const legacy = new DatabaseSync(file);
+  legacy.exec(`CREATE TABLE threads (id TEXT PRIMARY KEY, channel TEXT NOT NULL, threadTs TEXT NOT NULL,
+      owner TEXT NOT NULL, linearTicket TEXT, UNIQUE(channel, threadTs));
+    CREATE TABLE lead_launches (threadId TEXT PRIMARY KEY REFERENCES threads(id), id TEXT NOT NULL, dispatchId TEXT);
+    INSERT INTO threads VALUES ('thread', 'C1', '1', 'owner', NULL);
+    INSERT INTO lead_launches VALUES ('thread', 'legacy-launch', 'legacy-dispatch');`);
+  legacy.close();
+  let store = new Store(file);
+  try {
+    expect(store.pendingLaunch('thread')).toBe('legacy-launch');
+    expect(store.launchDispatch('thread')).toBe('legacy-dispatch');
+    const thread = store.thread('thread')!;
+    for (const ts of ['1', '2']) store.saveInbound(thread, { installationId: 'app', eventId: ts, channel: 'C1', ts,
+      user: 'owner', text: `Prompt ${ts}` }, 'prompt');
+    expect(store.launchPromptKeys('thread')).toEqual([]);
+    expect(store.inbound('thread').map(message => message.state)).toEqual(['pending', 'pending']);
+    store.finishLeadLaunch('thread');
+    const oldWriter = new DatabaseSync(file);
+    try { expect(() => oldWriter.prepare('INSERT INTO lead_launches VALUES (?, ?, NULL)').run('thread', 'next-launch')).not.toThrow(); }
+    finally { oldWriter.close(); }
+    const firstKey = store.inbound('thread')[0].key;
+    store.saveLaunchPrompt('thread', firstKey);
+    store.close(); store = new Store(file);
+    expect(store.launchPromptKeys('thread')).toEqual([firstKey]);
+    store.finishLeadLaunch('thread'); store.beginLeadLaunch('thread', 'fresh-launch');
+    expect(store.launchPromptKeys('thread')).toEqual([]);
   } finally { store.close(); }
 });
