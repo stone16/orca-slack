@@ -11,6 +11,11 @@ interface WorkerState {
 }
 interface WorkerRead { source?: string; cursor?: string }
 interface Launch { dispatchId: string; taskId: string; runId: string; effects: { kind?: string; role?: string; id?: string }[] }
+interface ListedWorker {
+  dispatchId: string; taskId: string; runId: string; agentTerminalHandle?: string | null;
+  projection: { workspace: { id: string } };
+}
+interface WorkerList { workers: ListedWorker[]; page: { hasMore: boolean; nextCursor?: string | null } }
 
 export class Leads {
   private queues = new Map<string, Promise<unknown>>();
@@ -159,10 +164,45 @@ export class Leads {
     });
   }
   async poll(): Promise<void> {
+    await this.reconcile();
     const results = await Promise.allSettled(this.store.activeLeads().map(lead =>
       this.serial(lead.threadId, () => this.observe(lead))));
     const failed = results.find(result => result.status === 'rejected');
     if (failed) throw failed.reason;
+  }
+  async reconcile(): Promise<void> {
+    for (const launch of this.store.pendingLeadLaunches()) {
+      await this.serial(launch.threadId, async () => {
+        if (this.store.pendingLaunch(launch.threadId) !== launch.id) return;
+        const active = this.store.leadSessions(launch.threadId).find(session => session.active);
+        if (active && this.state(active) !== 'interrupted') return;
+        const workers: ListedWorker[] = [];
+        const cursors = new Set<string>();
+        let cursor: string | undefined;
+        do {
+          const page = await this.orca.call<WorkerList>('worker-list', ['--run', this.config.runId,
+            ...(cursor ? ['--cursor', cursor] : [])]);
+          if (!page || !Array.isArray(page.workers) || typeof page.page?.hasMore !== 'boolean' ||
+              page.workers.some(worker => !worker || typeof worker.dispatchId !== 'string' || !worker.dispatchId ||
+                typeof worker.taskId !== 'string' || !worker.taskId || typeof worker.runId !== 'string' ||
+                typeof worker.projection?.workspace?.id !== 'string')) throw new Error('Invalid worker list');
+          workers.push(...page.workers);
+          cursor = page.page.hasMore ? page.page.nextCursor ?? undefined : undefined;
+          if (page.page.hasMore && (!cursor || cursors.has(cursor))) throw new Error('Invalid worker list cursor');
+          if (cursor) cursors.add(cursor);
+        } while (cursor);
+        const owned = new Set(this.store.threads().flatMap(thread => this.store.leadSessions(thread.id).map(session => session.dispatchId)));
+        const tree = this.store.worktrees(launch.threadId)[0];
+        const matches = workers.filter(worker => worker.runId === this.config.runId && tree &&
+          worker.projection.workspace.id === tree.id && !owned.has(worker.dispatchId) &&
+          (!launch.dispatchId || worker.dispatchId === launch.dispatchId));
+        if (matches.length !== 1 || !matches[0].agentTerminalHandle) return;
+        const worker = matches[0];
+        this.store.completeLeadLaunch({ id: launch.id, threadId: launch.threadId, worktreeId: tree.id,
+          runId: worker.runId, dispatchId: worker.dispatchId, taskId: worker.taskId, handle: worker.agentTerminalHandle! },
+        this.store.inbound(launch.threadId).filter(message => message.kind === 'prompt' && message.state === 'pending').map(message => message.key));
+      });
+    }
   }
   private async observe(lead: LeadSession): Promise<void> {
     if (!this.store.leadSessions(lead.threadId).some(session => session.id === lead.id && session.active) || this.state(lead) === 'interrupted') return;

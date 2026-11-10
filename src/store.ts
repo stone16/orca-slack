@@ -322,6 +322,11 @@ export class Store {
   pendingLaunch(threadId: string): string | undefined {
     return this.db.prepare('SELECT id FROM lead_launches WHERE threadId=?').get(threadId)?.id as string | undefined;
   }
+  pendingLeadLaunches(): { threadId: string; id: string; dispatchId?: string }[] {
+    return this.db.prepare('SELECT * FROM lead_launches ORDER BY rowid').all()
+      .map(({ dispatchId, ...row }) => ({ ...row, ...(dispatchId === null ? {} : { dispatchId }) })) as
+      { threadId: string; id: string; dispatchId?: string }[];
+  }
   beginLeadLaunch(threadId: string, id: string): void {
     this.db.prepare('INSERT INTO lead_launches VALUES (?, ?, NULL)').run(threadId, id);
   }
