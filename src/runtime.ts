@@ -168,17 +168,21 @@ export class Runtime {
     this.log('info', `retention complete archived=${result.archived.length} retained=${result.retained.length}`);
     for (const item of result.retained) this.log('warn', `retention deferred: ${item.reason}`);
   }
-  private async deliver(report: Report): Promise<void> {
+  private async deliver(report: Report): Promise<void | boolean> {
     let payload: { dispatchId?: string; taskId?: string; outcome?: string };
     try { payload = JSON.parse(report.payload ?? '{}'); } catch { return; }
     if (!payload || typeof payload !== 'object') return;
     const thread = this.store.threads().find(thread => this.store.leadSessions(thread.id).some(session =>
       session.dispatchId === payload.dispatchId && session.taskId === payload.taskId && session.runId === report.runId));
+    if (!thread) {
+      if (typeof payload.dispatchId === 'string' && typeof payload.taskId === 'string' &&
+          !this.store.ownsLeadDispatch(payload.dispatchId)) return false;
+      return;
+    }
     if (thread && this.store.inbound(thread.id).some(message => message.kind === 'stop' && message.state === 'pending')) {
       await this.socket!.adapter.bridge.replayStops(thread.id);
     }
     await this.leads.report(report);
-    if (!thread) return;
     const adapter = this.socket!.adapter;
     if (report.type === 'question') {
       const decision = this.store.decision(report.id);
