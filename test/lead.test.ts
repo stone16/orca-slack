@@ -660,3 +660,16 @@ test('reconciliation waits for an in-flight launch and never starts or adopts it
   expect(calls(h.commands, 'worker-start')).toHaveLength(1);
   expect(calls(h.commands, 'worker-list')).toHaveLength(0);
 });
+
+test('reconciliation uses a partial dispatch receipt saved while waiting for the launch queue', async () => {
+  const h = setup(); h.partialLaunch();
+  const gate = h.block('worker-start');
+  const launching = h.bridge.event(event);
+  const failedLaunch = expect(launching).rejects.toThrow('uncertain command');
+  await gate.ready;
+  h.workerLists({ '': { workers: [listedWorker('partial-dispatch'), listedWorker('unrelated')], page: { hasMore: false } } });
+  const recovering = h.leads.reconcile();
+  gate.release(); await failedLaunch; await recovering;
+  expect(h.store.activeLeads()).toMatchObject([{ dispatchId: 'partial-dispatch' }]);
+  expect(h.store.pendingLaunch(threadId)).toBeUndefined();
+});
