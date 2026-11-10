@@ -230,22 +230,24 @@ export class SlackAdapter {
 
 export function registerHandlers(app: App, adapter: SlackAdapter,
   handle: (work: () => Promise<void>) => Promise<void> = work => work()): void {
+  const processEvent = app.processEvent.bind(app);
+  app.processEvent = event => handle(() => processEvent(event));
   for (const type of ['message', 'app_mention'] as const) {
     app.event(type, async ({ event, body }) => {
       if (('subtype' in event && event.subtype && !['file_share', 'thread_broadcast'].includes(event.subtype)) ||
           'bot_id' in event || !('user' in event) || !event.user || !('text' in event) || typeof event.text !== 'string' ||
           !('ts' in event) || !event.ts || !('channel' in event) || !event.channel ||
           !body.api_app_id || !(body.team_id || body.enterprise_id) || !body.event_id) return;
-      await handle(() => adapter.event({ installationId: `${body.api_app_id}:${body.team_id || body.enterprise_id}`,
+      await adapter.event({ installationId: `${body.api_app_id}:${body.team_id || body.enterprise_id}`,
         eventId: body.event_id!, channel: event.channel, ts: event.ts,
-        threadTs: 'thread_ts' in event ? event.thread_ts : undefined, user: event.user!, text: event.text! }));
+        threadTs: 'thread_ts' in event ? event.thread_ts : undefined, user: event.user!, text: event.text! });
     });
   }
   app.action<BlockAction>(/^(decision_\d+|switch-repository|stop|cleanup|retry|log-tail)$/, async ({ ack, action, body }) => {
     await ack();
     if (!('value' in action) || !action.value || !body.channel || !body.message) return;
-    await handle(() => adapter.action({ actionId: action.action_id, value: action.value!, channel: body.channel!.id,
-      user: body.user.id, messageTs: body.message!.ts, triggerId: body.trigger_id }));
+    await adapter.action({ actionId: action.action_id, value: action.value!, channel: body.channel!.id,
+      user: body.user.id, messageTs: body.message!.ts, triggerId: body.trigger_id });
   });
 }
 
