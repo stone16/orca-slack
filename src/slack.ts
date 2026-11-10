@@ -64,10 +64,16 @@ export class Bridge {
     if (cutoff) this.store.archivePendingPrompts(threadId, cutoff);
     if (messageKey) this.store.markInboundForwarded(messageKey);
   }
-  private async forwardPending(threadId: string): Promise<void> {
+  replayStops(threadId: string): Promise<void> {
+    return this.serial(threadId, () => this.forwardStops(threadId));
+  }
+  private async forwardStops(threadId: string): Promise<void> {
     for (const message of this.store.inbound(threadId)) {
       if (message.state === 'pending' && message.kind === 'stop') await this.stop(threadId, message.key);
     }
+  }
+  private async forwardPending(threadId: string): Promise<void> {
+    await this.forwardStops(threadId);
     if (this.leads) return this.leads.forward(threadId);
     for (const message of this.store.inbound(threadId)) {
       if (message.state !== 'pending') continue;
