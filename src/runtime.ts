@@ -174,6 +174,9 @@ export class Runtime {
     if (!payload || typeof payload !== 'object') return;
     const thread = this.store.threads().find(thread => this.store.leadSessions(thread.id).some(session =>
       session.dispatchId === payload.dispatchId && session.taskId === payload.taskId && session.runId === report.runId));
+    if (thread && this.store.inbound(thread.id).some(message => message.kind === 'stop' && message.state === 'pending')) {
+      await this.socket!.adapter.bridge.replayStops(thread.id);
+    }
     await this.leads.report(report);
     if (!thread) return;
     const adapter = this.socket!.adapter;
