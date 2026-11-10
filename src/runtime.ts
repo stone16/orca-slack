@@ -181,6 +181,7 @@ export class Runtime {
     }
     if (this.store.inbound(thread.id).some(message => message.kind === 'stop' && message.state === 'pending')) {
       await this.socket!.adapter.bridge.replayStops(thread.id);
+      return;
     }
     await this.leads.report(report);
     const adapter = this.socket!.adapter;
