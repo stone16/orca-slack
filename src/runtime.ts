@@ -48,6 +48,7 @@ export class Runtime {
   private stopping?: Promise<void>;
   private closed = false;
   private log: Log;
+  private prQueue: Promise<void> = Promise.resolve();
   constructor(private config: Config, private options: RuntimeOptions = {}) {
     this.log = options.log ?? redactingLog(process.env);
     const boundary = options.run ?? command(config.coordinatorTerminal);
@@ -131,12 +132,16 @@ export class Runtime {
       void this.work(job).catch(error => this.log('error', error)).finally(() => { busy = false; });
     }, milliseconds));
   }
-  private async pollPullRequests(): Promise<void> {
-    const result = await this.poller.poll(undefined, async change => {
-      const tree = this.store.trackedWorktrees().find(tree => tree.id === change.worktreeId);
-      if (tree) await this.refresh(tree.threadId);
+  private pollPullRequests(threadId?: string): Promise<void> {
+    const result = this.prQueue.catch(() => {}).then(async () => {
+      const result = await this.poller.poll(threadId, async change => {
+        const tree = this.store.trackedWorktrees().find(tree => tree.id === change.worktreeId);
+        if (tree) await this.refresh(tree.threadId);
+      });
+      for (const failure of result.failures) this.log('warn', failure.reason);
     });
-    for (const failure of result.failures) this.log('warn', failure.reason);
+    this.prQueue = result;
+    return result;
   }
   private async retain(): Promise<void> {
     const result = this.unbound.archiveExpired();
@@ -154,9 +159,12 @@ export class Runtime {
     const adapter = this.socket!.adapter;
     if (report.type === 'question') {
       const decision = this.store.decision(report.id);
-      if (decision) await adapter.decision({ threadId: thread.id, id: report.id, owner: thread.owner,
-        question: report.body ?? report.subject ?? '', options: decision.options });
+      let question = report.body ?? report.subject ?? '';
+      try { const body = JSON.parse(question); if (typeof body?.question === 'string') question = body.question; } catch {}
+      if (decision) await adapter.decision({ threadId: thread.id, id: report.id, owner: thread.owner, question, options: decision.options });
     } else if (report.type === 'worker_done' && (payload.outcome === 'succeeded' || payload.outcome === 'failed')) {
+      if (!this.store.leadEvents(thread.id).some(event => event.key === report.id && ['completed', 'failed'].includes(event.kind))) return;
+      await this.pollPullRequests(thread.id);
       await adapter.result({ threadId: thread.id, id: report.id, owner: thread.owner, outcome: payload.outcome,
         text: report.body ?? report.subject ?? '', needsAttention: payload.outcome === 'failed' });
     }
