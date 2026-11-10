@@ -100,7 +100,7 @@ function fixture(realBolt = false) {
   return { root, config, file, control, commands, posts, reactions, lifecycle, logs, runtime,
     receive: (body: ReceiverEvent['body'], ack: () => Promise<void>) => bolt!.processEvent({ body, ack }),
     adapter: () => adapter, options: () => options,
-    addReport: (type = 'question', outcome?: string) => { messages.push({ id: 'report', sequence: 1, type, body: 'Choose a color',
+    addReport: (type = 'question', outcome?: string, body = 'Choose a color') => { messages.push({ id: 'report', sequence: 1, type, body,
       payload: JSON.stringify({ dispatchId: 'dispatch', taskId: 'task', outcome }) }); unread = true; },
     pause: (step: string) => { pauseStep = step; }, release: () => release?.(), paused: () => !!release,
   };
@@ -307,4 +307,56 @@ test('retry intent survives reopening and recognizes a completed replacement wit
     expect(store.inbound('thread')[0].state).toBe('forwarded');
     expect(store.leadSessions('thread')).toHaveLength(2);
   } finally { store.close(); }
+});
+
+
+for (const phase of ['interrupted', 'stopped', 'replaced'] as const) for (const outcome of ['succeeded', 'failed']) {
+  test(`late ${outcome} reports from ${phase} sessions never publish a result card`, async () => {
+    vi.useFakeTimers();
+    const f = fixture(); const store = new Store(f.file);
+    try {
+      store.markInboundForwarded(store.inbound('thread')[0].key);
+      if (phase === 'replaced') store.replaceLead({ id: 'replacement', threadId: 'thread', worktreeId: 'tree', runId: f.config.runId,
+        taskId: 'replacement-task', dispatchId: 'replacement-dispatch', handle: 'replacement-handle' });
+      else store.recordLeadEvent({ threadId: 'thread', key: phase, sessionId: 'session', kind: phase, text: phase }, phase === 'stopped' ? 'session' : undefined);
+      await f.runtime.start(); f.addReport('worker_done', outcome, 'Late result must stay hidden');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(f.posts.map(post => post.text).join('\n')).not.toContain('Late result must stay hidden');
+      expect(store.slackCard('thread', 'result:report')).toBeUndefined();
+      expect(store.leadEvents('thread').some(event => event.key === 'report')).toBe(false);
+    } finally { store.close(); }
+  });
+}
+
+test('an accepted completion replays its result after the session has already ended', async () => {
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.markInboundForwarded(store.inbound('thread')[0].key);
+    store.recordLeadEvent({ threadId: 'thread', key: 'report', sessionId: 'session', kind: 'completed', text: 'Confirmed result' }, 'session');
+    f.addReport('worker_done', 'succeeded', 'Confirmed result');
+    await f.runtime.start();
+    expect(f.posts.filter(post => String(post.text).includes('Confirmed result'))).toHaveLength(1);
+    expect(store.reports(f.config.runId)[0].state).toBe('sent');
+  } finally { store.close(); }
+});
+
+test('optioned questions publish the question text and buttons without exposing their JSON envelope', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  f.addReport('question', undefined, JSON.stringify({ question: 'Which records?', options: ['orders', 'users'] }));
+  await vi.advanceTimersByTimeAsync(5_000);
+  const post = f.posts.find(post => String(post.text).includes('Which records?'));
+  expect(post?.text).not.toContain('"question"'); expect(post?.text).not.toContain('"options"');
+  expect(JSON.stringify(post?.blocks)).toContain('"text":"orders"');
+  expect(JSON.stringify(post?.blocks)).toContain('"text":"users"');
+});
+
+test('accepted completion refreshes its pull request state immediately before the next timer poll', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  f.control.prState = 'MERGED'; f.addReport('worker_done', 'succeeded');
+  await vi.advanceTimersByTimeAsync(5_000);
+  const store = new Store(f.file);
+  try { expect(JSON.parse(store.slackCard('thread', 'status')!.view).state).toBe('awaiting-verification'); }
+  finally { store.close(); }
 });
