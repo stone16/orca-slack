@@ -694,3 +694,24 @@ test.each(['running', 'completed'])('B1 adoption preserves post-snapshot prompts
   if (state === 'running') expect(argument(calls(recovered.commands, 'send')[0], '--body')).toBe('Also use Chinese copy');
   else expect(argument(calls(recovered.commands, 'worker-start')[0], '--spec')).toContain('Also use Chinese copy');
 });
+
+test.each(['empty', 'started'])('B2 a stopped partial dispatch stays owned after restart when the next launch is %s', async next => {
+  vi.useFakeTimers();
+  const h = diskSetup(); h.partialLaunch();
+  await expect(h.bridge.event(event)).rejects.toThrow('uncertain command');
+  await h.bridge.event({ ...event, eventId: 'stop-partial', ts: '2', threadTs: '1', text: '!stop' });
+  h.store.close(); stores.splice(stores.indexOf(h.store), 1);
+  const recovered = setup(h.file); recovered.fail('worker-start');
+  await expect(recovered.bridge.event({ ...event, eventId: 'retry-partial', ts: '3', threadTs: '1', text: 'Try the web fix again' })).rejects.toThrow();
+  recovered.fail(undefined);
+  const stopped = { ...listedWorker('partial-dispatch'), workerState: 'stopped', dispatchStatus: 'failed', terminalState: 'retained' };
+  recovered.workerLists({ '': { workers: next === 'empty' ? [stopped] : [stopped, listedWorker('new-worker')], page: { hasMore: false } } });
+  await recovered.leads.reconcile();
+  if (next === 'started') expect(recovered.store.activeLeads()).toMatchObject([{ dispatchId: 'new-worker' }]);
+  else {
+    expect(recovered.store.activeLeads()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000); await recovered.leads.reconcile();
+    expect(recovered.store.pendingLaunch(threadId)).toBeUndefined();
+  }
+  expect(recovered.store.leadSessions(threadId).some(session => session.dispatchId === 'partial-dispatch')).toBe(false);
+});
