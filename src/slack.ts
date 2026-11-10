@@ -44,7 +44,8 @@ export class Bridge {
   }
   async replay(threadId?: string): Promise<void> {
     if (threadId !== undefined) return this.serial(threadId, () => this.forwardPending(threadId));
-    const threads = new Set(this.store.inbound().filter(message => message.state === 'pending').map(message => message.threadId));
+    const threads = new Set(this.store.inbound().filter(message => message.state === 'pending' &&
+      !this.queues.has(message.threadId)).map(message => message.threadId));
     const results = await Promise.allSettled([...threads].map(id => this.replay(id)));
     const failed = results.find(result => result.status === 'rejected');
     if (failed) throw failed.reason;

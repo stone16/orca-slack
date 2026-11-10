@@ -649,7 +649,7 @@ test.each([
   expect(h.store.pendingLaunch(threadId)).toBe(launch);
 });
 
-test('reconciliation waits for an in-flight launch and never starts or adopts it twice', async () => {
+test('reconciliation skips an in-flight launch and never starts or adopts it twice', async () => {
   const h = setup(); const gate = h.block('worker-start');
   const launching = h.bridge.event(event); await gate.ready;
   const recovering = h.leads.reconcile();
@@ -661,7 +661,7 @@ test('reconciliation waits for an in-flight launch and never starts or adopts it
   expect(calls(h.commands, 'worker-list')).toHaveLength(0);
 });
 
-test('reconciliation uses a partial dispatch receipt saved while waiting for the launch queue', async () => {
+test('reconciliation uses a partial dispatch receipt on the first poll after the launch settles', async () => {
   const h = setup(); h.partialLaunch();
   const gate = h.block('worker-start');
   const launching = h.bridge.event(event);
@@ -670,6 +670,7 @@ test('reconciliation uses a partial dispatch receipt saved while waiting for the
   h.workerLists({ '': { workers: [listedWorker('partial-dispatch'), listedWorker('unrelated')], page: { hasMore: false } } });
   const recovering = h.leads.reconcile();
   gate.release(); await failedLaunch; await recovering;
+  await h.leads.reconcile();
   expect(h.store.activeLeads()).toMatchObject([{ dispatchId: 'partial-dispatch' }]);
   expect(h.store.pendingLaunch(threadId)).toBeUndefined();
 });
