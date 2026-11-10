@@ -1,4 +1,6 @@
-import { EventEmitter } from 'node:events';
+import { fork } from 'node:child_process';
+import { EventEmitter, once } from 'node:events';
+import ts from 'typescript';
 import { App, type ReceiverEvent } from '@slack/bolt';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,7 +40,8 @@ function fixture(realBolt = false) {
   store.saveInbound(thread, { installationId: 'A:T', eventId: 'event', channel: 'C1', ts: '2', threadTs: '1', user: config.ownerId, text: 'example Follow up' }, 'prompt');
   store.close();
   const commands: { program: string; args: string[] }[] = [];
-  const control = { prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false };
+  const control = { prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false,
+    workers: [] as { dispatchId: string; taskId: string; runId: string; agentTerminalHandle: string; projection: { workspace: { id: string } } }[] };
   const treePath = join(root, 'worktree'); mkdirSync(treePath);
   const messages: { id: string; type: string; sequence: number; payload: string; body: string }[] = [];
   let unread = false;
@@ -58,6 +61,7 @@ function fixture(realBolt = false) {
     if (args[1] === 'send' && control.failSend) throw new Error('scripted forwarding unavailable');
     if (args[1] === 'worker-start' && control.failStart) throw new Error('scripted start unavailable');
     if (args[1] === 'worker-start') result = { dispatchId: 'new-dispatch', taskId: 'new-task', runId: config.runId, effects: [{ kind: 'terminal', role: 'agent', id: 'new-handle' }] };
+    if (args[1] === 'worker-list') result = { workers: control.workers, page: { hasMore: false, nextCursor: null } };
     if (args[1] === 'inbox') result = { count: messages.length, messages };
     if (args[1] === 'check') {
       result = { messages: unread ? messages : [] };
@@ -83,27 +87,31 @@ function fixture(realBolt = false) {
   const checkpoint = async (step: string) => {
     if (step === pauseStep) await new Promise<void>(resolve => { release = resolve; });
   };
-  const runtime = new Runtime(config, { run, log: (level, message) => logs.push(`${level} ${message}`),
-    installGuard: (repository, directory) => { commands.push({ program: 'guard', args: [repository, directory] }); return join(directory, 'pre-push'); },
-    checkpoint,
-    socketMode: (store, supplied) => {
-      options = supplied;
-      adapter = new SlackAdapter(client, store, supplied);
-      const receiver = { init: () => {}, start: async () => { lifecycle.push('connected'); socket.emit('connected'); }, stop: async () => { lifecycle.push('disconnected'); } };
-      if (realBolt) {
-        bolt = new App({ receiver, token: 'fixture-token', botId: 'B1', botUserId: config.botId, tokenVerificationEnabled: false });
-        bolt.error(async error => { logs.push(error.message); });
-        registerHandlers(bolt, adapter, supplied.handle);
-      }
-      return { adapter, socket, app: bolt ?? receiver };
-    },
-  });
-  runtimes.push(runtime);
-  return { root, config, file, control, socket, commands, posts, reactions, lifecycle, logs, runtime,
+  const createRuntime = () => {
+    const runtime = new Runtime(config, { run, log: (level, message) => logs.push(`${level} ${message}`),
+      installGuard: (repository, directory) => { commands.push({ program: 'guard', args: [repository, directory] }); return join(directory, 'pre-push'); },
+      checkpoint,
+      socketMode: (store, supplied) => {
+        options = supplied;
+        adapter = new SlackAdapter(client, store, supplied);
+        const receiver = { init: () => {}, start: async () => { lifecycle.push('connected'); socket.emit('connected'); }, stop: async () => { lifecycle.push('disconnected'); } };
+        if (realBolt) {
+          bolt = new App({ receiver, token: 'fixture-token', botId: 'B1', botUserId: config.botId, tokenVerificationEnabled: false });
+          bolt.error(async error => { logs.push(error.message); });
+          registerHandlers(bolt, adapter, supplied.handle);
+        }
+        return { adapter, socket, app: bolt ?? receiver };
+      },
+    });
+    runtimes.push(runtime);
+    return runtime;
+  };
+  const runtime = createRuntime();
+  return { restart: createRuntime, root, config, file, control, socket, commands, posts, reactions, lifecycle, logs, runtime,
     receive: (body: ReceiverEvent['body'], ack: () => Promise<void>) => bolt!.processEvent({ body, ack }),
     adapter: () => adapter, options: () => options,
-    addReport: (type = 'question', outcome?: string, body = 'Choose a color') => { messages.push({ id: 'report', sequence: 1, type, body,
-      payload: JSON.stringify({ dispatchId: 'dispatch', taskId: 'task', outcome }) }); unread = true; },
+    addReport: (type = 'question', outcome?: string, body = 'Choose a color', identity = { dispatchId: 'dispatch', taskId: 'task' }) => { messages.push({ id: 'report', sequence: 1, type, body,
+      payload: JSON.stringify({ ...identity, outcome }) }); unread = true; },
     pause: (step: string) => { pauseStep = step; }, release: () => release?.(), paused: () => !!release,
   };
 }
@@ -410,5 +418,61 @@ test('reconnect processes a recovered completion before replaying a queued follo
     expect(store.activeLeads()[0]?.dispatchId).toBe('new-dispatch');
     expect(store.inbound('thread').find(message => message.eventId === 'queued')?.state).toBe('forwarded');
     expect(f.commands.filter(command => command.args[1] === 'send' && command.args.includes('Queued while disconnected'))).toHaveLength(1);
+  } finally { store.close(); }
+});
+
+async function killDuringLaunch(f: ReturnType<typeof fixture>) {
+  const modules = join(f.root, 'modules'); mkdirSync(modules);
+  writeFileSync(join(modules, 'package.json'), '{"type":"module"}');
+  for (const name of ['leads', 'lead-orca', 'orca', 'store', 'routing']) {
+    const source = readFileSync(new URL(`../src/${name}.ts`, import.meta.url), 'utf8');
+    writeFileSync(join(modules, `${name}.js`), ts.transpileModule(source, {
+      compilerOptions: { target: ts.ScriptTarget.ES2024, module: ts.ModuleKind.ESNext },
+    }).outputText);
+  }
+  const script = join(modules, 'launch.mjs');
+  writeFileSync(script, `
+    import { Store } from './store.js';
+    import { Leads } from './leads.js';
+    import { LeadCli } from './lead-orca.js';
+    const store = new Store(process.argv[2]);
+    const orca = new LeadCli(async args => {
+      if (args[1] !== 'worker-start') throw new Error('Unexpected command');
+      process.send({ dispatchId: 'adopted', taskId: 'adopted-task', runId: 'run_fixture',
+        agentTerminalHandle: 'adopted-handle', projection: { workspace: { id: 'tree' } } });
+      setInterval(() => {}, 1000);
+      return new Promise(() => {});
+    });
+    await new Leads(orca, store, { runId: 'run_fixture', repositories: [
+      { id: 'repo-fixture', name: 'example', aliases: [] }
+    ], botId: 'U00000001', agent: 'codex' }).forward('thread');
+  `);
+  const child = fork(script, [f.file], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  try {
+    const [worker] = await once(child, 'message');
+    f.control.workers.push(worker);
+    const exited = once(child, 'exit');
+    child.kill('SIGKILL');
+    expect(await exited).toEqual([null, 'SIGKILL']);
+    return worker as (typeof f.control.workers)[number];
+  } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
+}
+
+test('restart adopts a worker killed between worker-start and saveLaunchDispatch and posts its completion once', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.endLead('session');
+    const worker = await killDuringLaunch(f);
+    expect(store.pendingLaunch('thread')).toBeTruthy();
+    expect(store.launchDispatch('thread')).toBeFalsy();
+    await f.runtime.start();
+    expect(store.activeLeads()).toMatchObject([{ dispatchId: 'adopted', handle: 'adopted-handle' }]);
+    expect(store.pendingLaunch('thread')).toBeUndefined();
+    f.addReport('worker_done', 'succeeded', 'Recovered result', worker);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.posts.filter(post => String(post.text).includes('Recovered result'))).toHaveLength(1);
+    expect(JSON.parse(store.slackCard('thread', 'status')!.view).state).not.toBe('unknown');
+    expect(f.commands.filter(command => command.args[1] === 'worker-start')).toHaveLength(0);
   } finally { store.close(); }
 });
