@@ -4,7 +4,9 @@ Slack thread ⇄ [Orca](https://onorca.dev) orchestration bridge. One piece of w
 
 The Bridge runs on the machine that runs Orca. Slack is the entry and reporting surface; Orca runs the agents. The product behavior is defined in [docs/brief.md](docs/brief.md).
 
-Status: the tested TypeScript core includes Slack cards and a Bolt Socket Mode adapter. Live workspace acceptance and deployment remain for the milestone acceptance task.
+Status: the TypeScript runtime composes the core modules and runs as a user LaunchAgent. Full product acceptance remains for the milestone acceptance task.
+
+See [the runtime guide](docs/runtime.md) for ignored operator configuration, environment secrets, startup recovery, shutdown, and installation.
 
 - Product brief, the baseline for what we build: [docs/brief.md](docs/brief.md)
 - Requirements and priorities: [docs/features.md](docs/features.md)
@@ -72,7 +74,7 @@ Retrying a saved confirmation rechecks safety; an absent Orca entry and absent d
 `Store.cleanupReceipts(threadId)` retains the history after cleanup, and cleaned worktrees leave the poller's active set.
 Deleted worktrees' PR history does not block cleanup of the remaining worktrees.
 The ledger file must remain outside any worktree being removed.
-Button rendering and live Slack integration remain for the runtime slice.
+The runtime connects cleanup to the owner-confirmed Slack action.
 
 Run the disposable Git safety drive after building:
 

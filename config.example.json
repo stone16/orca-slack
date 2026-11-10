@@ -1,0 +1,21 @@
+{
+  "botId": "U00000001",
+  "ownerId": "U00000002",
+  "allowedUsers": ["U00000002"],
+  "runId": "run_replace",
+  "coordinatorTerminal": "term_replace",
+  "agent": "codex",
+  "archiveDirectory": "../archive/threads",
+  "hooksDirectory": "../bridge-hooks",
+  "retentionDays": 30,
+  "shutdownTimeoutMs": 25000,
+  "repositories": [
+    {
+      "id": "replace-with-orca-repository-id",
+      "name": "example",
+      "aliases": ["sample"],
+      "path": "../example",
+      "github": "example/project"
+    }
+  ]
+}
