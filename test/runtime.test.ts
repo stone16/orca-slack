@@ -519,3 +519,30 @@ test('a completed worker discovered on a later poll replays its report before ob
     expect(store.leadEvents('thread').at(-1)?.kind).toBe('completed');
   } finally { store.close(); }
 });
+
+test.each(['startup', 'poll'])('SF1 a pending stop fences an adopted dispatch before completion delivery at %s', async trigger => {
+  vi.useFakeTimers();
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.endLead('session');
+    const worker = await killDuringLaunch(f);
+    f.control.workers.length = 0;
+    const stop = { installationId: 'A:T', eventId: 'pending-stop', channel: 'C1', ts: '3', threadTs: '1', user: f.config.ownerId, text: '!stop' };
+    if (trigger === 'poll') {
+      await f.runtime.start();
+      await expect(f.adapter().event(stop)).rejects.toThrow('Cannot verify stop');
+    } else store.saveInbound(store.thread('thread')!, stop, 'stop');
+    f.control.workers.push(worker);
+    f.addReport('worker_done', 'succeeded', 'Do not publish a stopped result', worker);
+    if (trigger === 'startup') await f.runtime.start();
+    else await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.posts.map(post => post.text).join('\n')).not.toContain('Do not publish a stopped result');
+    expect(store.slackCard('thread', 'result:report')).toBeUndefined();
+    expect(store.leadEvents('thread').at(-1)?.kind).toBe('stopped');
+    expect(store.inbound('thread').find(message => message.eventId === 'pending-stop')?.state).toBe('forwarded');
+    expect(f.commands.filter(command => command.args[1] === 'worker-stop')).toEqual([
+      expect.objectContaining({ args: expect.arrayContaining(['--dispatch', worker.dispatchId]) }),
+    ]);
+  } finally { store.close(); }
+});
