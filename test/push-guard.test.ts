@@ -261,3 +261,14 @@ test('installation still fails on other git errors in an existing worktree', () 
   expect(existsSync(hooksDirectory)).toBe(false);
   expect(git(repository, 'config', '--get', 'core.hooksPath').status).toBe(1);
 });
+
+test.each(['prunable', 'missing', 'prunable directory'])('SF4 installation refuses hooks inside a %s worktree before skipping it', stale => {
+  const { repository, worktree } = fixture();
+  if (stale === 'missing') run(repository, 'worktree', 'lock', worktree);
+  if (stale === 'prunable directory') rmSync(join(worktree, '.git'));
+  else rmSync(worktree, { recursive: true });
+  const hooksDirectory = join(worktree, 'hooks');
+  expect(() => installPushGuard(repository, hooksDirectory)).toThrow('Hooks must be outside every worktree');
+  expect(existsSync(hooksDirectory)).toBe(false);
+  expect(git(repository, 'config', '--local', '--get', 'core.hooksPath').status).toBe(1);
+});
