@@ -165,7 +165,6 @@ export class Leads {
     });
   }
   async poll(): Promise<void> {
-    await this.reconcile();
     const results = await Promise.allSettled(this.store.activeLeads().map(lead =>
       this.serial(lead.threadId, () => this.observe(lead))));
     const failed = results.find(result => result.status === 'rejected');
