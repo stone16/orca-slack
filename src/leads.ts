@@ -70,7 +70,7 @@ export class Leads {
       return;
     }
     const id = randomUUID();
-    this.store.beginLeadLaunch(threadId, id);
+    this.store.beginLeadLaunch(threadId, id, pending.at(-1)!.key);
     let tree = this.store.worktrees(threadId)[0];
     try {
       if (!tree) {
