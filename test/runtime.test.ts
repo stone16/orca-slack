@@ -582,3 +582,27 @@ test('SF2 a report requeued during flush remains pending until its result is del
     expect(store.reports(f.config.runId)[0].state).toBe('sent');
   } finally { gate.release(); f.release(); await launching; store.close(); }
 });
+
+test('SF3 an in-flight launch leaves other threads delivering reports on successive polls', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  const store = new Store(f.file);
+  const threadId = JSON.stringify(['C2', '10']);
+  store.saveThread({ id: threadId, channel: 'C2', threadTs: '10', owner: f.config.ownerId });
+  store.saveWorktree({ id: 'other-tree', threadId, repository: 'repo-fixture', branch: 'other-feature' });
+  const gate = f.block('worker-start');
+  const launching = f.adapter().event({ installationId: 'A:T', eventId: 'slow-launch', channel: 'C2', ts: '11', threadTs: '10',
+    user: f.config.ownerId, text: 'example Start a slow launch' });
+  try {
+    await gate.ready;
+    f.addReport('question', undefined, 'Other thread question');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.posts.filter(post => String(post.text).includes('Other thread question'))).toHaveLength(1);
+    expect(store.pendingLaunch(threadId)).toBeTruthy();
+    f.addReport('worker_done', 'succeeded', 'Other thread result', undefined, 'completion');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.posts.filter(post => String(post.text).includes('Other thread result'))).toHaveLength(1);
+    expect(store.pendingLaunch(threadId)).toBeTruthy();
+    expect(f.commands.filter(command => command.args[1] === 'worker-list')).toHaveLength(0);
+  } finally { gate.release(); await launching; store.close(); }
+});
