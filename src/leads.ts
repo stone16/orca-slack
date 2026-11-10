@@ -174,6 +174,7 @@ export class Leads {
     for (const launch of this.store.pendingLeadLaunches()) {
       await this.serial(launch.threadId, async () => {
         if (this.store.pendingLaunch(launch.threadId) !== launch.id) return;
+        const dispatchId = this.store.launchDispatch(launch.threadId);
         const active = this.store.leadSessions(launch.threadId).find(session => session.active);
         if (active && this.state(active) !== 'interrupted') return;
         const workers: ListedWorker[] = [];
@@ -195,8 +196,8 @@ export class Leads {
         const tree = this.store.worktrees(launch.threadId)[0];
         const matches = workers.filter(worker => worker.runId === this.config.runId && tree &&
           worker.projection.workspace.id === tree.id && !owned.has(worker.dispatchId) &&
-          (!launch.dispatchId || worker.dispatchId === launch.dispatchId));
-        if (!matches.length && !launch.dispatchId) {
+          (!dispatchId || worker.dispatchId === dispatchId));
+        if (!matches.length && !dispatchId) {
           const missingSince = this.missingLaunches.get(launch.id) ?? Date.now();
           this.missingLaunches.set(launch.id, missingSince);
           if (Date.now() - missingSince >= 60_000) {
