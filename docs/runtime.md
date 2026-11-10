@@ -61,6 +61,15 @@ It polls reports and lead activity every five seconds, pull requests every 60 se
 Pull requests and retention also run once at startup.
 Only the runtime owns the ledger and its asynchronous handlers.
 
+Before report delivery at startup and on each report poll, pending lead launches are reconciled against every page of `worker-list --run <run_id>`.
+A unique dispatch in that Run whose `projection.workspace.id` matches the lead worktree is adopted only if no ledger session owns it.
+The dispatch's `taskId`, `dispatchId`, and `agentTerminalHandle` become the lead session identity.
+Reports already stored for that identity return to normal delivery, including reports marked sent before the session was known.
+If complete worker lists still show no matching dispatch after a 60-second grace, a launch with no saved dispatch identity is cleared so pending input can start a lead again.
+The grace starts at the first complete list without a match and restarts after a Bridge restart; it matches the Orca command timeout.
+Ambiguous matches, missing terminal handles, unreadable lists, and launches with a saved dispatch identity stay unresolved rather than authorize another launch.
+Push guard installation skips worktrees Git marks prunable and missing worktree directories; other installation errors still stop startup.
+
 `SIGINT` and `SIGTERM` stop future timer ticks and incoming handlers, disconnect Socket Mode, drain existing work, and close the ledger.
 The lifecycle gate runs before Bolt acknowledges a delivery. Already admitted deliveries drain before the ledger closes. Later deliveries remain unacknowledged for Slack to redeliver.
 Normal shutdown exits with code 0.
