@@ -12,7 +12,7 @@ import { PrPoller } from './pr-poller.js';
 import { installPushGuard } from './push-guard.js';
 import { ReportLoop, type ReportStep } from './report-loop.js';
 import type { StatusView, WorkState } from './render.js';
-import { Store, type Report } from './store.js';
+import { Store, type LeadIdentity, type Report } from './store.js';
 import { UnboundThreads } from './unbound-threads.js';
 
 interface SocketMode {
@@ -168,16 +168,16 @@ export class Runtime {
     this.log('info', `retention complete archived=${result.archived.length} retained=${result.retained.length}`);
     for (const item of result.retained) this.log('warn', `retention deferred: ${item.reason}`);
   }
-  private async deliver(report: Report): Promise<void | boolean> {
+  private async deliver(report: Report): Promise<void | LeadIdentity> {
     let payload: { dispatchId?: string; taskId?: string; outcome?: string };
     try { payload = JSON.parse(report.payload ?? '{}'); } catch { return; }
     if (!payload || typeof payload !== 'object') return;
     const thread = this.store.threads().find(thread => this.store.leadSessions(thread.id).some(session =>
       session.dispatchId === payload.dispatchId && session.taskId === payload.taskId && session.runId === report.runId));
     if (!thread) {
-      if (typeof payload.dispatchId === 'string' && payload.dispatchId && typeof payload.taskId === 'string' && payload.taskId &&
-          !this.store.ownsLeadDispatch(payload.dispatchId) && this.store.pendingLeadLaunches().some(launch =>
-            !launch.dispatchId || launch.dispatchId === payload.dispatchId)) return false;
+      if (typeof payload.dispatchId === 'string' && typeof payload.taskId === 'string') {
+        return { runId: report.runId, dispatchId: payload.dispatchId, taskId: payload.taskId };
+      }
       return;
     }
     if (this.store.inbound(thread.id).some(message => message.kind === 'stop' && message.state === 'pending')) {
