@@ -34,7 +34,7 @@ const labels: Record<WorkState, string> = {
 const active: WorkState[] = ['classifying', 'discussing', 'implementing', 'waiting', 'pr-open', 'unknown', 'interrupted'];
 export function statusActions(view: StatusView): StatusAction[] {
   const actions: StatusAction[] = [];
-  if (['classifying', 'discussing', 'implementing'].includes(view.state) &&
+  if (view.worktrees.length > 0 && ['classifying', 'discussing', 'implementing'].includes(view.state) &&
       view.worktrees.every(tree => !tree.hasCommits && !tree.pullRequest)) actions.push('switch-repository');
   if (active.includes(view.state)) actions.push('stop');
   if (view.state === 'awaiting-verification' && view.worktrees.every(tree => !tree.agentActive &&

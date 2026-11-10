@@ -88,3 +88,37 @@ test('entry point rejects malformed startup configuration without logging tokens
   expect(output).toContain('configuration field');
   expect(output).not.toContain('xoxb-startup-secret'); expect(output).not.toContain('xapp-startup-secret');
 });
+
+
+for (const fatal of ['unhandled rejection', 'uncaught exception']) {
+  test(`${fatal} redacts credentials and disconnects through failed shutdown`, async () => {
+    const checkout = mkdtempSync(join(root, 'fatal-'));
+    const script = join(checkout, 'child.mjs');
+    const trigger = fatal === 'unhandled rejection' ? 'void Promise.reject(new Error(process.env.SLACK_APP_TOKEN));' : 'setImmediate(() => { throw new Error(process.env.SLACK_BOT_TOKEN); });';
+    writeFileSync(script, `
+      import { EventEmitter } from 'node:events';
+      import { writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      import { parseConfig } from '../build/config.js';
+      import { serve } from '../build/service.js';
+      import { SlackAdapter } from '../build/bolt.js';
+      const config = parseConfig({botId:'U00000001',ownerId:'U00000002',allowedUsers:['U00000002'],runId:'run_fixture',coordinatorTerminal:'term_fixture',agent:'codex',archiveDirectory:'../archive',hooksDirectory:'../hooks',shutdownTimeoutMs:3000,repositories:[{id:'repo',name:'example',aliases:[],path:'../repo',github:'example/project'}]},process.env,process.cwd());
+      await serve(config, {
+        installGuard: () => '',
+        run: async () => JSON.stringify({ok:true,result:{count:0,messages:[]}}),
+        socketMode: (store,options) => ({adapter:new SlackAdapter({},store,options),socket:new EventEmitter(),app:{start:async()=>{},stop:async()=>{writeFileSync(join(process.cwd(),'disconnected'),'');}}})
+      });
+      ${trigger}
+    `);
+    const child = spawn(process.execPath, [script], { cwd: checkout, env: { ...process.env,
+      SLACK_BOT_TOKEN: 'xoxb-fatal-secret', SLACK_APP_TOKEN: 'xapp-fatal-secret' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = ''; child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });
+    try {
+      const code = await new Promise(resolve => child.on('exit', resolve));
+      expect(code).toBe(1);
+      expect(existsSync(join(checkout, 'disconnected'))).toBe(true);
+      expect(output).toContain('[redacted]'); expect(output).toContain('bridge stopped code=1');
+      expect(output).not.toContain('xoxb-fatal-secret'); expect(output).not.toContain('xapp-fatal-secret');
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
+  });
+}

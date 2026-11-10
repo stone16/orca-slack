@@ -38,7 +38,7 @@ function fixture(realBolt = false) {
   store.saveInbound(thread, { installationId: 'A:T', eventId: 'event', channel: 'C1', ts: '2', threadTs: '1', user: config.ownerId, text: 'example Follow up' }, 'prompt');
   store.close();
   const commands: { program: string; args: string[] }[] = [];
-  const control = { prState: 'OPEN', worktreePresent: true, failStart: false };
+  const control = { prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false };
   const treePath = join(root, 'worktree'); mkdirSync(treePath);
   const messages: { id: string; type: string; sequence: number; payload: string; body: string }[] = [];
   let unread = false;
@@ -55,6 +55,7 @@ function fixture(realBolt = false) {
     if (args[0] === 'worktree' && args[1] === 'ps') result = { truncated: false, worktrees: control.worktreePresent ? [{ worktreeId: 'tree', worktreeInstanceId: 'instance', hostId: 'local', agents: [{ liveness: 'exited' }], unverifiableTerminalCount: 0 }] : [] };
     if (args[0] === 'worktree' && args[1] === 'show') result = { worktree: { id: 'tree', instanceId: 'instance', identity: { key: 'identity' }, hostId: 'local', path: treePath, isMainWorktree: false } };
     if (args[0] === 'worktree' && args[1] === 'rm') { rmSync(treePath, { recursive: true }); control.worktreePresent = false; }
+    if (args[1] === 'send' && control.failSend) throw new Error('scripted forwarding unavailable');
     if (args[1] === 'worker-start' && control.failStart) throw new Error('scripted start unavailable');
     if (args[1] === 'worker-start') result = { dispatchId: 'new-dispatch', taskId: 'new-task', runId: config.runId, effects: [{ kind: 'terminal', role: 'agent', id: 'new-handle' }] };
     if (args[1] === 'inbox') result = { count: messages.length, messages };
@@ -72,7 +73,8 @@ function fixture(realBolt = false) {
   const client: SlackClient = { chat: {
     postMessage: async args => { posts.push({ ...args }); return { ts: `${++sequence}` }; },
     update: async args => { posts.push({ ...args }); }, postEphemeral: async () => {},
-  }, reactions: { add: async args => { reactions.push(args.name); } }, views: { open: async () => {} } };
+  }, reactions: { add: async args => { if (control.failReaction) throw new Error('scripted reaction unavailable'); reactions.push(args.name); } }, views: { open: async () => {} } };
+  const socket = new EventEmitter();
   let bolt: App | undefined;
   let options!: AdapterOptions;
   let adapter!: SlackAdapter;
@@ -87,17 +89,17 @@ function fixture(realBolt = false) {
     socketMode: (store, supplied) => {
       options = supplied;
       adapter = new SlackAdapter(client, store, supplied);
-      const receiver = { init: () => {}, start: async () => { lifecycle.push('connected'); }, stop: async () => { lifecycle.push('disconnected'); } };
+      const receiver = { init: () => {}, start: async () => { lifecycle.push('connected'); socket.emit('connected'); }, stop: async () => { lifecycle.push('disconnected'); } };
       if (realBolt) {
         bolt = new App({ receiver, token: 'fixture-token', botId: 'B1', botUserId: config.botId, tokenVerificationEnabled: false });
         bolt.error(async error => { logs.push(error.message); });
         registerHandlers(bolt, adapter, supplied.handle);
       }
-      return { adapter, socket: new EventEmitter(), app: bolt ?? receiver };
+      return { adapter, socket, app: bolt ?? receiver };
     },
   });
   runtimes.push(runtime);
-  return { root, config, file, control, commands, posts, reactions, lifecycle, logs, runtime,
+  return { root, config, file, control, socket, commands, posts, reactions, lifecycle, logs, runtime,
     receive: (body: ReceiverEvent['body'], ack: () => Promise<void>) => bolt!.processEvent({ body, ack }),
     adapter: () => adapter, options: () => options,
     addReport: (type = 'question', outcome?: string, body = 'Choose a color') => { messages.push({ id: 'report', sequence: 1, type, body,
@@ -359,4 +361,39 @@ test('accepted completion refreshes its pull request state immediately before th
   const store = new Store(f.file);
   try { expect(JSON.parse(store.slackCard('thread', 'status')!.view).state).toBe('awaiting-verification'); }
   finally { store.close(); }
+});
+
+
+for (const failure of ['forwarding', 'reaction']) for (const trigger of ['poll', 'reconnect']) {
+  test(`resident ${trigger} replays a transient ${failure} failure without another Slack message`, async () => {
+    vi.useFakeTimers();
+    const f = fixture(); await f.runtime.start();
+    f.control.failSend = failure === 'forwarding'; f.control.failReaction = failure === 'reaction';
+    await expect(f.adapter().event({ installationId: 'A:T', eventId: 'transient', channel: 'C1', ts: '3', threadTs: '1', user: f.config.ownerId, text: 'Follow up once' })).rejects.toThrow();
+    const store = new Store(f.file);
+    try {
+      const message = store.inbound('thread').find(message => message.eventId === 'transient')!;
+      expect(message.state).toBe(failure === 'forwarding' ? 'pending' : 'forwarded');
+      expect(store.hasSlackReaction(message.key, 'white_check_mark')).toBe(false);
+      f.control.failSend = false; f.control.failReaction = false;
+      if (trigger === 'poll') await vi.advanceTimersByTimeAsync(5_000);
+      else { f.socket.emit('reconnecting'); f.socket.emit('connected'); await vi.advanceTimersByTimeAsync(0); }
+      expect(store.inbound('thread').find(message => message.eventId === 'transient')?.state).toBe('forwarded');
+      expect(store.hasSlackReaction(message.key, 'white_check_mark')).toBe(true);
+    } finally { store.close(); }
+  });
+}
+
+test('unbound M1 threads never display the unavailable repository switch action', async () => {
+  const f = fixture(); await f.runtime.start();
+  await f.adapter().event({ installationId: 'A:T', eventId: 'unrouted', channel: 'C2', ts: '4', user: f.config.ownerId, text: `<@${f.config.botId}> clarify something` });
+  const posts = f.posts.filter(post => post.channel === 'C2');
+  expect(posts.length).toBeGreaterThan(0);
+  expect(JSON.stringify(posts)).not.toContain('"action_id":"switch-repository"');
+  expect(JSON.stringify(posts)).toContain('"action_id":"stop"');
+});
+
+test('unexpected Socket Mode reconnects produce an operational log line', async () => {
+  const f = fixture(); await f.runtime.start(); f.socket.emit('reconnecting');
+  expect(f.logs).toContain('warn Socket Mode reconnecting');
 });
