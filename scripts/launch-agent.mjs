@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { accessSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const defaultCheckout = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -13,7 +13,25 @@ function settings(options = {}) {
   const agentDirectory = options.agentDirectory ?? join(homedir(), 'Library', 'LaunchAgents');
   return { label, checkout, agentDirectory, logDirectory: options.logDirectory ?? join(checkout, 'data', 'logs'),
     config: resolve(checkout, options.config ?? process.env.BRIDGE_CONFIG ?? 'config.local.json'),
-    path: options.path ?? process.env.PATH, domain: `gui/${process.getuid()}`, plist: join(agentDirectory, `${label}.plist`) };
+    domain: `gui/${process.getuid()}`, plist: join(agentDirectory, `${label}.plist`) };
+}
+export function resolveTools(searchPath = process.env.PATH ?? '') {
+  const directories = searchPath.split(delimiter).filter(isAbsolute);
+  const tools = {};
+  for (const name of ['node', 'orca', 'gh', 'git']) {
+    for (const directory of directories) {
+      const candidate = resolve(directory, name);
+      if (candidate.split(sep).includes('Cellar')) continue;
+      try {
+        accessSync(candidate, constants.X_OK);
+        if (statSync(candidate).isFile()) { tools[name] = candidate; break; }
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
+      }
+    }
+    if (!tools[name]) throw new Error(`Cannot find a stable ${name} executable outside Cellar; add its package-manager link to PATH`);
+  }
+  return { ...tools, path: [...new Set([...Object.values(tools).map(dirname), '/usr/bin', '/bin', '/usr/sbin', '/sbin'])].join(delimiter) };
 }
 export function renderLaunchAgent(template, values) {
   const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -32,9 +50,10 @@ function unload(current, run) {
 export function install(options, run = launchctl) {
   const current = settings(options);
   for (const file of [join(current.checkout, 'dist', 'main.js'), join(current.checkout, '.env'), current.config]) accessSync(file);
+  const tools = resolveTools(options?.searchPath);
   const rendered = renderLaunchAgent(readFileSync(join(current.checkout, 'deploy', 'launch-agent.plist.template'), 'utf8'), {
-    LABEL: current.label, NODE: process.execPath, ENV_FILE: join(current.checkout, '.env'), ENTRY_POINT: join(current.checkout, 'dist', 'main.js'),
-    CHECKOUT: current.checkout, PATH: current.path, CONFIG: current.config,
+    LABEL: current.label, NODE: tools.node, ENV_FILE: join(current.checkout, '.env'), ENTRY_POINT: join(current.checkout, 'dist', 'main.js'),
+    CHECKOUT: current.checkout, PATH: tools.path, CONFIG: current.config,
     STDOUT: join(current.logDirectory, 'bridge.log'), STDERR: join(current.logDirectory, 'bridge-error.log'),
   });
   mkdirSync(current.agentDirectory, { recursive: true, mode: 0o700 });

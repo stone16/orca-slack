@@ -56,12 +56,13 @@ The service uses its identity for Orca calls and recovers that same Run's inbox 
 ## Start and stop
 
 Run `npm start` in the checkout to run in the foreground.
-At startup, the Bridge installs the push guard on every configured repository, connects Socket Mode, reconciles reports, and replays pending Slack input.
+At startup, the Bridge installs the push guard on every configured repository, reconciles reports, replays pending Slack input, and refreshes state before connecting Socket Mode.
 It polls reports and lead activity every five seconds, pull requests every 60 seconds, and retention every hour.
 Pull requests and retention also run once at startup.
 Only the runtime owns the ledger and its asynchronous handlers.
 
 `SIGINT` and `SIGTERM` stop future timer ticks and incoming handlers, disconnect Socket Mode, drain existing work, and close the ledger.
+The lifecycle gate runs before Bolt acknowledges a delivery. Already admitted deliveries drain before the ledger closes. Later deliveries remain unacknowledged for Slack to redeliver.
 Normal shutdown exits with code 0.
 A shutdown that exceeds its configured deadline exits with code 1 and relies on ledger recovery at restart.
 An abrupt kill can repeat a delivery accepted by Slack before its durable sent marker, as described in the core recovery contract.
@@ -70,7 +71,8 @@ An Orca history coverage gap stays explicit in the ledger and startup log.
 The runtime connects the existing renderer, permission checks, lead management, failure retry, PR poller, cleanup checks, archive storage, and push guard.
 Retries require the failed thread's owner and save the retry request before starting a replacement lead.
 Cleanup uses the existing fresh GitHub, Git, and Orca safety checks.
-Repository switching remains an M2 feature.
+Resident polling and Socket Mode reconnects replay pending input and retry missing reactions. Unexpected reconnects appear in the operational log. Unhandled rejections and uncaught exceptions pass through credential redaction and a failed shutdown.
+Repository switching remains an M2 feature and unbound M1 threads do not display its button.
 
 ## Install the user LaunchAgent
 
@@ -84,7 +86,8 @@ launchctl list dev.orca-slack.bridge
 ```
 
 The installer renders `deploy/launch-agent.plist.template` into the user's LaunchAgents directory and loads it with `launchctl bootstrap`.
-It resolves the current Node executable, checkout, config, `.env`, command search path, and log paths at install time.
+It finds executable links for Node, Orca, `gh`, and Git on the installing shell's PATH. It preserves those executable paths rather than resolving package-manager links into Cellar. Installation fails before unloading an existing service if a required executable is available only under Cellar.
+The generated service PATH contains only the discovered executable directories and `/usr/bin:/bin:/usr/sbin:/sbin`. Unrelated shell and agent-session directories stay out. The installer also resolves the checkout, config, `.env`, and log paths at install time.
 Logs go to the ignored `data/logs/bridge.log` and `data/logs/bridge-error.log`.
 The generated plist restarts the service after exit, with a five-second launch throttle and a 30-second launchd exit limit.
 Repeated installation replaces the same label.
