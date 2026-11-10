@@ -36,15 +36,15 @@ export function installPushGuard(repository: string, hooksDirectory: string): st
   for (const record of worktrees) {
     const fields = record.split('\0');
     const worktree = fields[0].slice('worktree '.length);
+    const physicalWorktree = canonical(worktree);
+    if (physicalDirectory === physicalWorktree || physicalDirectory.startsWith(`${physicalWorktree}${sep}`)) {
+      throw new Error('Hooks must be outside every worktree');
+    }
     if (fields.some(field => field === 'prunable' || field.startsWith('prunable '))) continue;
     try { statSync(worktree); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;
-    }
-    const physicalWorktree = canonical(worktree);
-    if (physicalDirectory === physicalWorktree || physicalDirectory.startsWith(`${physicalWorktree}${sep}`)) {
-      throw new Error('Hooks must be outside every worktree');
     }
     let configured: string | undefined;
     try { configured = git(worktree, 'config', '--get', 'core.hooksPath'); }
