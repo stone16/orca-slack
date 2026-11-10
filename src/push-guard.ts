@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 
 const hook = `#!/bin/sh
@@ -32,9 +32,16 @@ export function installPushGuard(repository: string, hooksDirectory: string): st
   };
   const directory = resolve(hooksDirectory);
   const physicalDirectory = canonical(directory);
-  const worktrees = git(repository, 'worktree', 'list', '--porcelain', '-z').split('\0')
-    .filter(field => field.startsWith('worktree ')).map(field => field.slice('worktree '.length));
-  for (const worktree of worktrees) {
+  const worktrees = git(repository, 'worktree', 'list', '--porcelain', '-z').split('\0\0').filter(Boolean);
+  for (const record of worktrees) {
+    const fields = record.split('\0');
+    const worktree = fields[0].slice('worktree '.length);
+    if (fields.some(field => field === 'prunable' || field.startsWith('prunable '))) continue;
+    try { statSync(worktree); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
     const physicalWorktree = canonical(worktree);
     if (physicalDirectory === physicalWorktree || physicalDirectory.startsWith(`${physicalWorktree}${sep}`)) {
       throw new Error('Hooks must be outside every worktree');
