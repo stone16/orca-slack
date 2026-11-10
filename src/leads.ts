@@ -19,6 +19,7 @@ interface WorkerList { workers: ListedWorker[]; page: { hasMore: boolean; nextCu
 
 export class Leads {
   private queues = new Map<string, Promise<unknown>>();
+  private missingLaunches = new Map<string, number>();
   constructor(private orca: LeadOrca, private store: Store, private config: LeadConfig) {}
 
   private serial<T>(threadId: string, work: () => Promise<T>): Promise<T> {
@@ -196,7 +197,17 @@ export class Leads {
         const matches = workers.filter(worker => worker.runId === this.config.runId && tree &&
           worker.projection.workspace.id === tree.id && !owned.has(worker.dispatchId) &&
           (!launch.dispatchId || worker.dispatchId === launch.dispatchId));
-        if (matches.length !== 1 || !matches[0].agentTerminalHandle) return;
+        if (!matches.length && !launch.dispatchId) {
+          const missingSince = this.missingLaunches.get(launch.id) ?? Date.now();
+          this.missingLaunches.set(launch.id, missingSince);
+          if (Date.now() - missingSince >= 60_000) {
+            this.store.finishLeadLaunch(launch.threadId);
+            this.missingLaunches.delete(launch.id);
+          }
+          return;
+        }
+        this.missingLaunches.delete(launch.id);
+        if (matches.length !== 1 || typeof matches[0].agentTerminalHandle !== 'string' || !matches[0].agentTerminalHandle) return;
         const worker = matches[0];
         this.store.completeLeadLaunch({ id: launch.id, threadId: launch.threadId, worktreeId: tree.id,
           runId: worker.runId, dispatchId: worker.dispatchId, taskId: worker.taskId, handle: worker.agentTerminalHandle! },
