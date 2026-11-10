@@ -12,6 +12,7 @@ export interface LeadSession {
   id: string; threadId: string; worktreeId: string; runId: string;
   taskId: string; dispatchId: string; handle: string; active: boolean;
 }
+export type LeadIdentity = Pick<LeadSession, 'runId' | 'dispatchId' | 'taskId'>;
 export interface Decision {
   id: string; threadId: string; options: string[]; slackTs: string;
   answer?: string; answeredBy?: string;
@@ -244,8 +245,10 @@ export class Store {
   hasReport(runId: string, id: string, sequence: number): boolean {
     return !!this.db.prepare('SELECT 1 FROM reports WHERE runId=? AND id=? AND sequence=?').get(runId, id, sequence);
   }
-  markReportSent(runId: string, id: string): void {
-    this.db.prepare("UPDATE reports SET state='sent' WHERE runId=? AND id=?").run(runId, id);
+  markReportSent(runId: string, id: string, unmatched?: LeadIdentity): void {
+    this.db.prepare(`UPDATE reports SET state='sent' WHERE runId=? AND id=? AND NOT EXISTS (
+      SELECT 1 FROM lead_sessions WHERE runId=? AND dispatchId=? AND taskId=?)`)
+      .run(runId, id, unmatched?.runId ?? null, unmatched?.dispatchId ?? null, unmatched?.taskId ?? null);
   }
   reconcileInbox(runId: string, inbox: Inbox, observedIds: readonly string[] = []): Coverage {
     return this.transaction(() => {

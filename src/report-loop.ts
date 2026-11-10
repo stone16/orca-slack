@@ -1,5 +1,5 @@
 import { CliOrca } from './orca.js';
-import { Store, type Coverage, type Report } from './store.js';
+import { Store, type Coverage, type LeadIdentity, type Report } from './store.js';
 
 export type ReportStep = 'before-peek' | 'after-peek' | 'after-peek-persist' | 'after-consume' |
   'after-consume-persist' | 'after-inbox' | 'after-send' | 'after-sent';
@@ -8,7 +8,7 @@ export class ReportLoop {
   private queue: Promise<unknown> = Promise.resolve();
   private reconciled = false;
   constructor(private orca: CliOrca, private store: Store, private runId: string,
-    private send: (report: Report) => Promise<void | boolean>,
+    private send: (report: Report) => Promise<void | LeadIdentity>,
     private checkpoint: (step: ReportStep) => void | Promise<void> = () => {}) {}
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
@@ -55,10 +55,9 @@ export class ReportLoop {
   private async flush(): Promise<void> {
     for (const report of this.store.reports(this.runId)) {
       if (report.state === 'sent') continue;
-      const sent = await this.send(report);
+      const unmatched = await this.send(report);
       await this.checkpoint('after-send');
-      if (sent === false) continue;
-      this.store.markReportSent(this.runId, report.id);
+      this.store.markReportSent(this.runId, report.id, unmatched || undefined);
       await this.checkpoint('after-sent');
     }
   }
