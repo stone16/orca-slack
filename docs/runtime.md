@@ -69,7 +69,8 @@ Adoption acknowledges only prompts through that cutoff; later prompts stay pendi
 For legacy launch rows without a cutoff, adoption retains the old behavior of acknowledging all prompts pending at adoption so the original request cannot launch a duplicate lead or answer a question.
 Launch cutoffs and stopped partial-dispatch ownership use additive metadata tables; existing launch rows and their table shape remain compatible.
 Reports already stored for that identity return to normal delivery, including reports marked sent before the session was known.
-Reports for identities that have not been adopted stay pending only while a launch has an unknown or matching dispatch identity; otherwise they are acknowledged and ignored.
+Unmatched reports are acknowledged and ignored without waiting for a launch to settle.
+If a session acquires the report's dispatch and task identity in the same Run during an unmatched delivery attempt, the acknowledgement leaves that report pending for delivery on the next poll.
 Saved stops replay before a matching report can publish.
 Background reconciliation and input replay skip threads busy with a live launch so other threads continue polling.
 If complete worker lists still show no matching dispatch after a 60-second grace, a launch with no saved dispatch identity is cleared so pending input can start a lead again.
