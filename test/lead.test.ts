@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { LeadCli } from '../src/lead-orca.js';
 import { Leads } from '../src/leads.js';
 import { Bridge } from '../src/slack.js';
@@ -11,7 +11,7 @@ import { Store, type Report, type SlackEvent } from '../src/store.js';
 
 const stores: Store[] = [];
 const roots: string[] = [];
-afterEach(() => { stores.splice(0).forEach(store => store.close()); roots.splice(0).forEach(root => rmSync(root, { recursive: true })); });
+afterEach(() => { vi.useRealTimers(); stores.splice(0).forEach(store => store.close()); roots.splice(0).forEach(root => rmSync(root, { recursive: true })); });
 const repositories = [{ id: 'repo-web', name: 'web', aliases: ['frontend'] }, { id: 'repo-api', name: 'api', aliases: ['backend'] }];
 const slack = { refuse: async () => {}, ownerAction: async () => {} };
 const event: SlackEvent = { installationId: 'app', eventId: 'first', channel: 'channel', ts: '1', user: 'owner', text: '<@BOT> Fix web password errors to show a specific reason' };
@@ -20,6 +20,7 @@ function setup(file = ':memory:') {
   stores.push(store);
   const commands: string[][] = [];
   let starts = 0;
+  let workerLists: Record<string, unknown> = { '': { workers: [], page: { hasMore: false, nextCursor: null } } };
   let failure: string | undefined;
   let changeSource = false;
   let partialLaunch = false;
@@ -45,6 +46,7 @@ function setup(file = ':memory:') {
     let result: unknown = {};
     if (args[0] === 'worktree') result = { worktree: { id: 'tree-1', branch: 'refs/heads/feat/thread' } };
     else if (args[1] === 'worker-start') result = { dispatchId: `dispatch-${++starts}`, taskId: `task-${starts}`, runId: 'run', effects: [{ kind: 'terminal', role: 'agent', id: `handle-${starts}` }] };
+    else if (args[1] === 'worker-list') result = workerLists[args.includes('--cursor') ? args[args.indexOf('--cursor') + 1] : ''];
     else if (args[1] === 'worker-show') result = state;
     else if (args[1] === 'worker-read') result = read;
     else if (args[0] === 'terminal') result = terminal;
@@ -54,6 +56,7 @@ function setup(file = ':memory:') {
   const leads = new Leads(orca, store, { runId: 'run', repositories, botId: 'BOT', agent: 'codex' });
   const bridge = new Bridge(orca, slack, store, ['owner', 'peer'], 'BOT', undefined, leads);
   return { store, orca, leads, bridge, commands, reports,
+    workerLists: (pages: Record<string, unknown>) => { workerLists = pages; },
     block: (verb: string) => {
       let entered!: () => void, release!: () => void;
       const ready = new Promise<void>(resolve => { entered = resolve; });
@@ -566,4 +569,25 @@ test.each(['worker-stop', 'queued action'])('R2 SF3 button stop preserves prompt
   expect(h.store.inbound(threadId).map(message => message.state)).toEqual(['forwarded', phase === 'worker-stop' ? 'archived' : 'forwarded', 'forwarded']);
   expect(calls(h.commands, 'worker-start')).toHaveLength(2);
   expect(argument(calls(h.commands, 'worker-start')[1], '--spec')).toContain('After the click');
+});
+
+test('an empty interrupted launch clears after the in-flight grace and the next message starts exactly one lead', async () => {
+  vi.useFakeTimers();
+  const h = setup(); h.fail('worker-start');
+  await expect(h.bridge.event(event)).rejects.toThrow('uncertain command');
+  const launch = h.store.pendingLaunch(threadId);
+  h.fail(undefined);
+  await h.leads.poll();
+  await vi.advanceTimersByTimeAsync(59_999);
+  await h.leads.poll();
+  expect(h.store.pendingLaunch(threadId)).toBe(launch);
+  await vi.advanceTimersByTimeAsync(1);
+  await h.leads.poll();
+  expect(h.store.pendingLaunch(threadId)).toBeUndefined();
+  await h.bridge.event({ ...event, eventId: 'retry-empty', ts: '2', threadTs: '1', text: 'Try the web fix again' });
+  await h.bridge.replay();
+  await h.leads.poll();
+  expect(h.store.activeLeads()).toHaveLength(1);
+  expect(calls(h.commands, 'worker-start')).toHaveLength(2);
+  expect(argument(calls(h.commands, 'worker-start')[1], '--spec')).toContain('Try the web fix again');
 });
