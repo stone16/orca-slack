@@ -42,7 +42,7 @@ function fixture(realBolt = false) {
   store.close();
   const commands: { program: string; args: string[] }[] = [];
   const control = { prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false, workerListDelay: 0, terminalStatus: 'running',
-    workers: [] as { dispatchId: string; taskId: string; runId: string; agentTerminalHandle: string; projection: { workspace: { id: string } } }[] };
+    workers: [] as { dispatchId: string; taskId: string; runId: string; agentTerminalHandle: string | null; projection: { workspace: { id: string } } }[] };
   const treePath = join(root, 'worktree'); mkdirSync(treePath);
   const messages: { id: string; type: string; sequence: number; payload: string; body: string }[] = [];
   let unread = false;
@@ -499,8 +499,7 @@ test('a stored report dropped before adoption is replayed once across further re
     f.control.workers.length = 0;
     f.addReport('worker_done', 'succeeded', 'Previously dropped result', worker);
     await f.runtime.start();
-    expect(store.reports(f.config.runId)[0].state).toBe('pending');
-    store.markReportSent(f.config.runId, 'report');
+    expect(store.reports(f.config.runId)[0].state).toBe('sent');
     expect(store.slackCard('thread', 'result:report')).toBeUndefined();
     f.control.workers.push(worker);
     await vi.advanceTimersByTimeAsync(5_000);
@@ -665,16 +664,36 @@ test.each(['sequenced', 'unsequenced'])('R2 an unowned %s report without a pendi
   } finally { f.release(); store.close(); }
 });
 
-test('R2 a launch for a different known dispatch does not defer an unowned report', async () => {
+
+
+test.each(['ambiguous', 'missing handle', 'known dispatch', 'known missing handle'])('R3 a retained %s launch acknowledges unowned reports and replays them once after adoption', async mode => {
+  vi.useFakeTimers();
   const f = fixture(); const store = new Store(f.file);
   try {
     store.endLead('session');
-    store.beginLeadLaunch('thread', 'pending-launch', store.inbound('thread')[0].key);
-    store.saveLaunchDispatch('thread', 'different-dispatch');
-    f.addReport('worker_done', 'succeeded', 'Unrelated result', { dispatchId: 'unowned', taskId: 'unowned-task' });
+    store.beginLeadLaunch('thread', 'retained-launch', store.inbound('thread')[0].key);
+    const worker = { dispatchId: 'unowned', taskId: 'unowned-task', runId: f.config.runId,
+      agentTerminalHandle: 'unowned-handle', projection: { workspace: { id: 'tree' } } };
+    if (mode.startsWith('known')) store.saveLaunchDispatch('thread', worker.dispatchId);
+    if (mode === 'ambiguous') f.control.workers.push(worker, { ...worker, dispatchId: 'other', taskId: 'other-task' });
+    else if (mode.includes('handle')) f.control.workers.push({ ...worker, agentTerminalHandle: null });
+    store.persistReports(f.config.runId, [{ id: 'retained-report', type: 'worker_done', body: 'Retained report',
+      payload: JSON.stringify({ dispatchId: worker.dispatchId, taskId: worker.taskId, outcome: 'succeeded' }) }]);
     await f.runtime.start();
-    expect(store.pendingLaunch('thread')).toBe('pending-launch');
     expect(store.reports(f.config.runId)[0].state).toBe('sent');
-    expect(f.posts.map(post => post.text).join('\n')).not.toContain('Unrelated result');
-  } finally { store.close(); }
+    const reads = f.commands.filter(command => command.args[1] === 'inbox').length;
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(store.pendingLaunch('thread')).toBe('retained-launch');
+    f.pause('after-send'); await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.paused()).toBe(false);
+    expect(f.commands.filter(command => command.args[1] === 'inbox')).toHaveLength(reads);
+    expect(f.posts.filter(post => String(post.text).includes('Retained report'))).toHaveLength(0);
+    f.pause('none'); f.control.workers.splice(0, f.control.workers.length, worker);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(store.pendingLaunch('thread')).toBeUndefined();
+    expect(store.reports(f.config.runId)[0].state).toBe('sent');
+    expect(f.posts.filter(post => String(post.text).includes('Retained report'))).toHaveLength(1);
+    expect(f.commands.filter(command => command.args[1] === 'worker-start')).toHaveLength(0);
+  } finally { f.release(); store.close(); }
 });
