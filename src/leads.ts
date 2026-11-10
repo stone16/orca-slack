@@ -79,6 +79,7 @@ export class Leads {
         this.store.saveWorktree(tree);
       }
       const messages = this.store.inbound(threadId).filter(message => message.kind === 'prompt' && message.state !== 'archived');
+      this.store.saveLaunchPrompt(threadId, messages.at(-1)!.key);
       const prompt = [
         'You are the lead for one Slack thread. The Bridge is the only Run coordinator.',
         'Do not run run-create, worker-start, dispatch, any sub-dispatch, or launch agents or create worktrees.',
@@ -211,7 +212,7 @@ export class Leads {
         const worker = matches[0];
         this.store.completeLeadLaunch({ id: launch.id, threadId: launch.threadId, worktreeId: tree.id,
           runId: worker.runId, dispatchId: worker.dispatchId, taskId: worker.taskId, handle: worker.agentTerminalHandle! },
-        this.store.inbound(launch.threadId).filter(message => message.kind === 'prompt' && message.state === 'pending').map(message => message.key));
+        this.store.launchPromptKeys(launch.threadId));
       });
     }
   }
