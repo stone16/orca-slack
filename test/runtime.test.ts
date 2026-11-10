@@ -498,7 +498,8 @@ test('a stored report dropped before adoption is replayed once across further re
     f.control.workers.length = 0;
     f.addReport('worker_done', 'succeeded', 'Previously dropped result', worker);
     await f.runtime.start();
-    expect(store.reports(f.config.runId)[0].state).toBe('sent');
+    expect(store.reports(f.config.runId)[0].state).toBe('pending');
+    store.markReportSent(f.config.runId, 'report');
     expect(store.slackCard('thread', 'result:report')).toBeUndefined();
     f.control.workers.push(worker);
     await vi.advanceTimersByTimeAsync(5_000);
@@ -574,7 +575,7 @@ test('SF2 a report requeued during flush remains pending until its result is del
     expect(f.paused()).toBe(true);
     expect(store.leadSessions('thread').some(session => session.dispatchId === 'new-dispatch')).toBe(false);
     gate.release(); await launching;
-    f.release(); await vi.advanceTimersByTimeAsync(0);
+    f.release(); f.pause('none'); await vi.advanceTimersByTimeAsync(0);
     expect(store.reports(f.config.runId)[0].state).toBe('pending');
     await vi.advanceTimersByTimeAsync(5_000);
     expect(f.posts.filter(post => String(post.text).includes('Fast launch result'))).toHaveLength(1);
