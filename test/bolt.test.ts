@@ -220,6 +220,22 @@ test('tokens are required from the environment and library logs redact both toke
   expect(logs.join(' ')).not.toContain('fixture-app-secret');
 });
 
+test('Slack logger drops debug while preserving info, warn, and error', () => {
+  const { store, options } = setup();
+  vi.stubEnv('SLACK_BOT_TOKEN', 'fixture-bot-secret');
+  vi.stubEnv('SLACK_APP_TOKEN', 'fixture-app-secret');
+  const log = vi.fn();
+  const { app } = createSocketMode(store, options, log);
+  log.mockClear();
+  app.logger.debug('private Slack message');
+  app.logger.info('info message');
+  app.logger.warn('warn message');
+  app.logger.error('error message');
+  expect(log.mock.calls).toEqual([
+    ['info', 'info message'], ['warn', 'warn message'], ['error', 'error message'],
+  ]);
+});
+
 test('simultaneous decision publication saves one decision and one Slack message', async () => {
   const { adapter, store, calls } = setup();
   const decision = { threadId: 'thread', id: 'question', owner: 'U1', question: 'Continue?', options: ['Continue'] };

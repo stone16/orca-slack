@@ -262,7 +262,7 @@ export function createSocketMode(store: Store, options: AdapterOptions,
     return String(text).replaceAll(token, '[redacted]').replaceAll(appToken, '[redacted]');
   };
   const logger: Logger = {
-    debug: (...args) => log('debug', args.map(redact).join(' ')),
+    debug: () => {},
     info: (...args) => log('info', args.map(redact).join(' ')),
     warn: (...args) => log('warn', args.map(redact).join(' ')),
     error: (...args) => log('error', args.map(redact).join(' ')),
