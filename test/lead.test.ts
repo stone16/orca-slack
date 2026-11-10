@@ -716,3 +716,25 @@ test.each(['empty', 'started'])('B2 a stopped partial dispatch stays owned after
   }
   expect(recovered.store.leadSessions(threadId).some(session => session.dispatchId === 'partial-dispatch')).toBe(false);
 });
+
+test('R1 a launch already owns its prompt cutoff while worktree creation is in flight', async () => {
+  const h = diskSetup(); const gate = h.block('create');
+  const launching = h.bridge.event(event);
+  try {
+    await gate.ready;
+    expect(h.store.pendingLaunch(threadId)).toBeTruthy();
+    h.store.saveInbound(h.store.thread(threadId)!, { ...event, eventId: 'during-tree', ts: '2', threadTs: '1', text: 'Include this later context' }, 'prompt');
+    expect(h.store.launchPromptKeys(threadId)).toEqual([h.store.inbound(threadId)[0].key]);
+  } finally { gate.release(); await launching; }
+});
+
+test('R1 a failed initial cutoff write rolls back the launch before external effects', async () => {
+  const h = diskSetup(); const db = new DatabaseSync(h.file);
+  try { db.exec(`CREATE TRIGGER abort_cutoff BEFORE INSERT ON lead_launch_prompts
+    BEGIN SELECT RAISE(ABORT, 'injected cutoff failure'); END`); }
+  finally { db.close(); }
+  await expect(h.bridge.event(event)).rejects.toThrow('injected cutoff failure');
+  expect(h.store.pendingLaunch(threadId)).toBeUndefined();
+  expect(calls(h.commands, 'create')).toHaveLength(0);
+  expect(calls(h.commands, 'worker-start')).toHaveLength(0);
+});

@@ -1,4 +1,5 @@
 import { fork } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter, once } from 'node:events';
 import ts from 'typescript';
 import { App, type ReceiverEvent } from '@slack/bolt';
@@ -619,5 +620,28 @@ test('SF1 a saved stop suppresses replay of an accepted but unpublished completi
     expect(store.leadEvents('thread').at(-1)?.kind).toBe('stopped');
     expect(store.slackCard('thread', 'result:report')).toBeUndefined();
     expect(f.posts.map(post => post.text).join('\n')).not.toContain('Unpublished result');
+  } finally { store.close(); }
+});
+
+test.each(['succeeded', 'failed', 'question'])('R1 legacy adoption acknowledges its launch prompts without a duplicate start or reply after %s', async outcome => {
+  vi.useFakeTimers();
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.endLead('session');
+    const legacy = new DatabaseSync(f.file);
+    try { legacy.prepare('INSERT INTO lead_launches VALUES (?, ?, NULL)').run('thread', 'legacy-launch'); }
+    finally { legacy.close(); }
+    const worker = { dispatchId: 'legacy-dispatch', taskId: 'legacy-task', runId: f.config.runId,
+      agentTerminalHandle: 'legacy-handle', projection: { workspace: { id: 'tree' } } };
+    f.control.workers.push(worker);
+    f.addReport(outcome === 'question' ? 'question' : 'worker_done', outcome === 'question' ? undefined : outcome, 'Legacy report', worker);
+    await f.runtime.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.commands.filter(command => command.args[1] === 'worker-start')).toHaveLength(0);
+    expect(f.commands.filter(command => command.args[1] === 'reply')).toHaveLength(0);
+    expect(store.inbound('thread')[0].state).toBe('forwarded');
+    expect(store.leadSessions('thread').filter(session => session.dispatchId === 'legacy-dispatch')).toHaveLength(1);
+    if (outcome === 'question') expect(store.decision('report')?.answer).toBeUndefined();
+    else expect(f.posts.filter(post => String(post.text).includes('Legacy report'))).toHaveLength(1);
   } finally { store.close(); }
 });
