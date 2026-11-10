@@ -476,3 +476,29 @@ test('restart adopts a worker killed between worker-start and saveLaunchDispatch
     expect(f.commands.filter(command => command.args[1] === 'worker-start')).toHaveLength(0);
   } finally { store.close(); }
 });
+
+test('a stored report dropped before adoption is replayed once across further restarts', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.endLead('session');
+    const worker = await killDuringLaunch(f);
+    f.control.workers.length = 0;
+    f.addReport('worker_done', 'succeeded', 'Previously dropped result', worker);
+    await f.runtime.start();
+    expect(store.reports(f.config.runId)[0].state).toBe('sent');
+    expect(store.slackCard('thread', 'result:report')).toBeUndefined();
+    f.control.workers.push(worker);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.posts.filter(post => String(post.text).includes('Previously dropped result'))).toHaveLength(1);
+    expect(store.reports(f.config.runId)[0].state).toBe('sent');
+    expect(store.leadEvents('thread').filter(event => event.key === 'report')).toHaveLength(1);
+    await f.runtime.stop();
+    const restarted = f.restart();
+    await restarted.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await restarted.stop();
+    expect(f.posts.filter(post => String(post.text).includes('Previously dropped result'))).toHaveLength(1);
+    expect(store.leadSessions('thread').filter(session => session.dispatchId === worker.dispatchId)).toHaveLength(1);
+  } finally { store.close(); }
+});
