@@ -591,3 +591,72 @@ test('an empty interrupted launch clears after the in-flight grace and the next 
   expect(calls(h.commands, 'worker-start')).toHaveLength(2);
   expect(argument(calls(h.commands, 'worker-start')[1], '--spec')).toContain('Try the web fix again');
 });
+
+function listedWorker(dispatchId: string, worktree = 'tree-1', runId = 'run') {
+  return { dispatchId, taskId: `task-${dispatchId}`, runId, agentTerminalHandle: `handle-${dispatchId}`,
+    projection: { workspace: { id: worktree } } };
+}
+
+test('reconciliation follows worker-list pages and adopts only an unowned dispatch in this Run and worktree', async () => {
+  const h = setup(); await h.bridge.event(event);
+  await h.leads.report(report('worker_done', { outcome: 'succeeded' }));
+  h.fail('worker-start');
+  await expect(h.bridge.event({ ...event, eventId: 'second-launch', ts: '2', threadTs: '1' })).rejects.toThrow();
+  h.fail(undefined);
+  h.workerLists({
+    '': { workers: [listedWorker('dispatch-1'), listedWorker('foreign-run', 'tree-1', 'another-run'), listedWorker('foreign-tree', 'another-tree')],
+      page: { hasMore: true, nextCursor: 'opaque-next' } },
+    'opaque-next': { workers: [listedWorker('recovered')], page: { hasMore: false, nextCursor: null } },
+  });
+  await h.leads.reconcile();
+  expect(h.store.leadSessions(threadId).map(session => [session.dispatchId, session.active])).toEqual([['dispatch-1', false], ['recovered', true]]);
+  expect(calls(h.commands, 'worker-list')).toEqual([
+    ['orchestration', 'worker-list', '--run', 'run', '--json', '--full'],
+    ['orchestration', 'worker-list', '--run', 'run', '--cursor', 'opaque-next', '--json', '--full'],
+  ]);
+});
+
+test.each(['ambiguous', 'missing handle', 'known dispatch'])('reconciliation retains a %s launch instead of guessing or clearing it', async scenario => {
+  vi.useFakeTimers();
+  const h = setup(); h.fail('worker-start');
+  await expect(h.bridge.event(event)).rejects.toThrow(); h.fail(undefined);
+  const launch = h.store.pendingLaunch(threadId);
+  const worker = listedWorker('recovered');
+  if (scenario === 'known dispatch') h.store.saveLaunchDispatch(threadId, 'known');
+  h.workerLists({ '': { workers: scenario === 'ambiguous' ? [worker, listedWorker('other')] :
+    scenario === 'missing handle' ? [{ ...worker, agentTerminalHandle: null }] : [], page: { hasMore: false } } });
+  await h.leads.reconcile();
+  await vi.advanceTimersByTimeAsync(120_000);
+  await h.leads.reconcile();
+  expect(h.store.pendingLaunch(threadId)).toBe(launch);
+  expect(h.store.activeLeads()).toEqual([]);
+});
+
+test.each([
+  { workers: [] },
+  { workers: [], page: { hasMore: true } },
+  { workers: [], page: { hasMore: true, nextCursor: 'loop' } },
+  { workers: [{ dispatchId: 'broken' }], page: { hasMore: false } },
+])('an incomplete or invalid worker list cannot clear a launch', async page => {
+  vi.useFakeTimers();
+  const h = setup(); h.fail('worker-start');
+  await expect(h.bridge.event(event)).rejects.toThrow(); h.fail(undefined);
+  const launch = h.store.pendingLaunch(threadId);
+  h.workerLists({ '': page, loop: page });
+  await expect(h.leads.reconcile()).rejects.toThrow('Invalid worker list');
+  await vi.advanceTimersByTimeAsync(120_000);
+  await expect(h.leads.reconcile()).rejects.toThrow('Invalid worker list');
+  expect(h.store.pendingLaunch(threadId)).toBe(launch);
+});
+
+test('reconciliation waits for an in-flight launch and never starts or adopts it twice', async () => {
+  const h = setup(); const gate = h.block('worker-start');
+  const launching = h.bridge.event(event); await gate.ready;
+  const recovering = h.leads.reconcile();
+  await Promise.resolve();
+  expect(calls(h.commands, 'worker-list')).toHaveLength(0);
+  gate.release(); await launching; await recovering;
+  expect(h.store.activeLeads()).toHaveLength(1);
+  expect(calls(h.commands, 'worker-start')).toHaveLength(1);
+  expect(calls(h.commands, 'worker-list')).toHaveLength(0);
+});
