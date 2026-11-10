@@ -105,7 +105,9 @@ export class Store {
         sessionId TEXT PRIMARY KEY REFERENCES lead_sessions(id), source TEXT NOT NULL, cursor TEXT NOT NULL,
         terminalSource TEXT NOT NULL, terminalCursor TEXT NOT NULL, frozen INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lead_launches (
-        threadId TEXT PRIMARY KEY REFERENCES threads(id), id TEXT NOT NULL, dispatchId TEXT);`);
+        threadId TEXT PRIMARY KEY REFERENCES threads(id), id TEXT NOT NULL, dispatchId TEXT);
+      CREATE TABLE IF NOT EXISTS stopped_lead_dispatches (
+        dispatchId TEXT PRIMARY KEY, threadId TEXT NOT NULL REFERENCES threads(id));`);
     if (!this.db.prepare('PRAGMA table_info(lead_launches)').all().some(column => column.name === 'promptKey')) {
       this.db.exec('ALTER TABLE lead_launches ADD COLUMN promptKey TEXT REFERENCES inbound(key)');
     }
@@ -347,8 +349,17 @@ export class Store {
   launchDispatch(threadId: string): string | undefined {
     return this.db.prepare('SELECT dispatchId FROM lead_launches WHERE threadId=?').get(threadId)?.dispatchId as string | undefined;
   }
-  finishLeadLaunch(threadId: string): void {
-    this.db.prepare('DELETE FROM lead_launches WHERE threadId=?').run(threadId);
+  ownsLeadDispatch(dispatchId: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM lead_sessions WHERE dispatchId=?
+      UNION ALL SELECT 1 FROM stopped_lead_dispatches WHERE dispatchId=? LIMIT 1`).get(dispatchId, dispatchId);
+  }
+  finishLeadLaunch(threadId: string, stoppedDispatchId?: string): void {
+    if (stoppedDispatchId) {
+      this.transaction(() => {
+        this.db.prepare('INSERT OR IGNORE INTO stopped_lead_dispatches VALUES (?, ?)').run(stoppedDispatchId, threadId);
+        this.db.prepare('DELETE FROM lead_launches WHERE threadId=?').run(threadId);
+      });
+    } else this.db.prepare('DELETE FROM lead_launches WHERE threadId=?').run(threadId);
   }
   pendingLeadDecisions(threadId: string): Decision[] {
     return this.db.prepare(`SELECT d.id FROM decisions d JOIN lead_events e ON d.id=e.key AND d.threadId=e.threadId

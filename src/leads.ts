@@ -135,7 +135,7 @@ export class Leads {
       if (!dispatchId && this.store.pendingLaunch(threadId)) throw new Error('Cannot verify stop while launch identity is unknown');
       if (dispatchId) await this.orca.call('worker-stop', ['--dispatch', dispatchId]);
       const stopId = messageKey ?? lead?.id ?? this.store.pendingLaunch(threadId) ?? randomUUID();
-      this.store.finishLeadLaunch(threadId);
+      this.store.finishLeadLaunch(threadId, dispatchId);
       this.store.recordLeadEvent({ threadId, key: `stop:${stopId}`, kind: 'stopped',
         text: 'Stopped; worktrees retained.', ...(lead ? { sessionId: lead.id } : {}) }, lead?.id);
     });
@@ -193,10 +193,9 @@ export class Leads {
           if (page.page.hasMore && (!cursor || cursors.has(cursor))) throw new Error('Invalid worker list cursor');
           if (cursor) cursors.add(cursor);
         } while (cursor);
-        const owned = new Set(this.store.threads().flatMap(thread => this.store.leadSessions(thread.id).map(session => session.dispatchId)));
         const tree = this.store.worktrees(launch.threadId)[0];
         const matches = workers.filter(worker => worker.runId === this.config.runId && tree &&
-          worker.projection.workspace.id === tree.id && !owned.has(worker.dispatchId) &&
+          worker.projection.workspace.id === tree.id && !this.store.ownsLeadDispatch(worker.dispatchId) &&
           (!dispatchId || worker.dispatchId === dispatchId));
         if (!matches.length && !dispatchId) {
           const missingSince = this.missingLaunches.get(launch.id) ?? Date.now();
