@@ -47,6 +47,7 @@ export class Runtime {
   private starting?: Promise<void>;
   private stopping?: Promise<void>;
   private closed = false;
+  private connectedOnce = false;
   private log: Log;
   private prQueue: Promise<void> = Promise.resolve();
   constructor(private config: Config, private options: RuntimeOptions = {}) {
@@ -102,6 +103,7 @@ export class Runtime {
     }, this.log);
     this.socket.socket.on('connected', this.connected);
     this.socket.socket.on('disconnected', this.disconnected);
+    this.socket.socket.on('reconnecting', this.reconnecting);
     const pendingReports = this.store.reports(this.config.runId).filter(report => report.state === 'pending').length;
     const coverage = await this.reports.recover();
     this.log(coverage.state === 'complete' ? 'info' : 'warn', `Orca inbox reconciled coverage=${coverage.state} count=${coverage.count}`);
@@ -117,12 +119,17 @@ export class Runtime {
     try { await this.socket.app.start(); }
     catch { throw new Error('Slack startup failed; check SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and botId'); }
     if (this.stopping) return;
-    this.repeat(5_000, async () => { await this.reports.poll(); await this.leads.poll(); await this.refresh(); });
+    this.repeat(5_000, async () => { await this.reports.poll(); await this.leads.poll(); await this.socket!.adapter.replay(); await this.refresh(); });
     this.repeat(60_000, () => this.pollPullRequests());
     this.repeat(3_600_000, () => this.retain());
     this.log('info', 'bridge ready');
   }
-  private connected = () => { this.log('info', 'Socket Mode connected'); };
+  private connected = () => {
+    this.log('info', 'Socket Mode connected');
+    if (this.connectedOnce) void this.work(() => this.socket!.adapter.replay()).catch(error => this.log('error', error));
+    this.connectedOnce = true;
+  };
+  private reconnecting = () => { this.log('warn', 'Socket Mode reconnecting'); };
   private disconnected = () => { this.log('warn', 'Socket Mode disconnected'); };
   private repeat(milliseconds: number, job: () => Promise<void>): void {
     let busy = false;
@@ -232,6 +239,7 @@ export class Runtime {
       const result = await disconnected;
       this.socket?.socket.off('connected', this.connected);
       this.socket?.socket.off('disconnected', this.disconnected);
+      this.socket?.socket.off('reconnecting', this.reconnecting);
       this.store.close();
       this.closed = true;
       const failed = result.find(result => result.status === 'rejected');
