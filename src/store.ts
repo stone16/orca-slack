@@ -358,6 +358,13 @@ export class Store {
       this.db.prepare('INSERT INTO lead_events VALUES (?, ?, ?, ?, ?)')
         .run(session.threadId, `started:${session.id}`, 'started', 'Lead session started', session.id);
       for (const key of messageKeys) this.markInboundForwarded(key);
+      for (const report of this.reports(session.runId)) {
+        let payload;
+        try { payload = JSON.parse(report.payload ?? '{}'); } catch { continue; }
+        if (payload?.dispatchId === session.dispatchId && payload?.taskId === session.taskId) {
+          this.db.prepare("UPDATE reports SET state='pending' WHERE runId=? AND id=?").run(report.runId, report.id);
+        }
+      }
     });
   }
   completeLeadReply(session: LeadSession, decisionId: string, answer: string, user: string, messageKey?: string): boolean {
