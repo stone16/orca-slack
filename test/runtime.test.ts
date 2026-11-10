@@ -46,8 +46,12 @@ function fixture(realBolt = false) {
   const messages: { id: string; type: string; sequence: number; payload: string; body: string }[] = [];
   let unread = false;
   let workerListReads = 0;
+  let blocked: { verb: string; entered: () => void; wait: Promise<void> } | undefined;
   const run: RunCommand = async (program, args) => {
     commands.push({ program, args });
+    if (program === 'orca' && blocked?.verb === args[1]) {
+      const current = blocked; blocked = undefined; current.entered(); await current.wait;
+    }
     if (program === 'gh') return JSON.stringify([{ number: 7, url: 'https://github.com/example/project/pull/7', state: control.prState, headRefOid: 'a'.repeat(40) }]);
     if (program === 'git') {
       if (args.includes('--show-toplevel')) return treePath;
@@ -111,9 +115,16 @@ function fixture(realBolt = false) {
   return { restart: createRuntime, root, config, file, control, socket, commands, posts, reactions, lifecycle, logs, runtime,
     receive: (body: ReceiverEvent['body'], ack: () => Promise<void>) => bolt!.processEvent({ body, ack }),
     adapter: () => adapter, options: () => options,
-    addReport: (type = 'question', outcome?: string, body = 'Choose a color', identity = { dispatchId: 'dispatch', taskId: 'task' }) => { messages.push({ id: 'report', sequence: 1, type, body,
+    addReport: (type = 'question', outcome?: string, body = 'Choose a color', identity = { dispatchId: 'dispatch', taskId: 'task' }, id = 'report') => { messages.push({ id, sequence: messages.length + 1, type, body,
       payload: JSON.stringify({ ...identity, outcome }) }); unread = true; },
-    pause: (step: string) => { pauseStep = step; }, release: () => release?.(), paused: () => !!release,
+    block: (verb: string) => {
+      let entered!: () => void, release!: () => void;
+      const ready = new Promise<void>(resolve => { entered = resolve; });
+      const wait = new Promise<void>(resolve => { release = resolve; });
+      blocked = { verb, entered, wait };
+      return { ready, release };
+    },
+    pause: (step: string) => { pauseStep = step; release = undefined; }, release: () => release?.(), paused: () => !!release,
   };
 }
 
@@ -545,4 +556,28 @@ test.each(['startup', 'poll'])('SF1 a pending stop fences an adopted dispatch be
       expect.objectContaining({ args: expect.arrayContaining(['--dispatch', worker.dispatchId]) }),
     ]);
   } finally { store.close(); }
+});
+
+test('SF2 a report requeued during flush remains pending until its result is delivered', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  const store = new Store(f.file); store.endLead('session');
+  f.pause('after-peek'); await vi.advanceTimersByTimeAsync(5_000);
+  expect(f.paused()).toBe(true);
+  const gate = f.block('worker-start');
+  const launching = f.adapter().event({ installationId: 'A:T', eventId: 'fast-launch', channel: 'C1', ts: '3', threadTs: '1',
+    user: f.config.ownerId, text: 'example Start the next change' });
+  try {
+    await gate.ready;
+    f.addReport('worker_done', 'succeeded', 'Fast launch result', { dispatchId: 'new-dispatch', taskId: 'new-task' });
+    f.release(); f.pause('after-send'); await vi.advanceTimersByTimeAsync(0);
+    expect(f.paused()).toBe(true);
+    expect(store.leadSessions('thread').some(session => session.dispatchId === 'new-dispatch')).toBe(false);
+    gate.release(); await launching;
+    f.release(); await vi.advanceTimersByTimeAsync(0);
+    expect(store.reports(f.config.runId)[0].state).toBe('pending');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.posts.filter(post => String(post.text).includes('Fast launch result'))).toHaveLength(1);
+    expect(store.reports(f.config.runId)[0].state).toBe('sent');
+  } finally { gate.release(); f.release(); await launching; store.close(); }
 });
