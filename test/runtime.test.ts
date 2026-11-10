@@ -606,3 +606,18 @@ test('SF3 an in-flight launch leaves other threads delivering reports on success
     expect(f.commands.filter(command => command.args[1] === 'worker-list')).toHaveLength(0);
   } finally { gate.release(); await launching; store.close(); }
 });
+
+test('SF1 a saved stop suppresses replay of an accepted but unpublished completion', async () => {
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.markInboundForwarded(store.inbound('thread')[0].key);
+    store.recordLeadEvent({ threadId: 'thread', key: 'report', sessionId: 'session', kind: 'completed', text: 'Unpublished result' }, 'session');
+    store.saveInbound(store.thread('thread')!, { installationId: 'A:T', eventId: 'stop-before-publish', channel: 'C1', ts: '3', threadTs: '1',
+      user: f.config.ownerId, text: '!stop' }, 'stop');
+    f.addReport('worker_done', 'succeeded', 'Unpublished result');
+    await f.runtime.start();
+    expect(store.leadEvents('thread').at(-1)?.kind).toBe('stopped');
+    expect(store.slackCard('thread', 'result:report')).toBeUndefined();
+    expect(f.posts.map(post => post.text).join('\n')).not.toContain('Unpublished result');
+  } finally { store.close(); }
+});
