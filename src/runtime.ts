@@ -175,8 +175,9 @@ export class Runtime {
     const thread = this.store.threads().find(thread => this.store.leadSessions(thread.id).some(session =>
       session.dispatchId === payload.dispatchId && session.taskId === payload.taskId && session.runId === report.runId));
     if (!thread) {
-      if (typeof payload.dispatchId === 'string' && typeof payload.taskId === 'string' &&
-          !this.store.ownsLeadDispatch(payload.dispatchId)) return false;
+      if (typeof payload.dispatchId === 'string' && payload.dispatchId && typeof payload.taskId === 'string' && payload.taskId &&
+          !this.store.ownsLeadDispatch(payload.dispatchId) && this.store.pendingLeadLaunches().some(launch =>
+            !launch.dispatchId || launch.dispatchId === payload.dispatchId)) return false;
       return;
     }
     if (this.store.inbound(thread.id).some(message => message.kind === 'stop' && message.state === 'pending')) {
