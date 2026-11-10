@@ -179,7 +179,7 @@ export class Runtime {
           !this.store.ownsLeadDispatch(payload.dispatchId)) return false;
       return;
     }
-    if (thread && this.store.inbound(thread.id).some(message => message.kind === 'stop' && message.state === 'pending')) {
+    if (this.store.inbound(thread.id).some(message => message.kind === 'stop' && message.state === 'pending')) {
       await this.socket!.adapter.bridge.replayStops(thread.id);
     }
     await this.leads.report(report);
