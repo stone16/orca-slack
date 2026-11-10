@@ -64,11 +64,13 @@ Only the runtime owns the ledger and its asynchronous handlers.
 Before report delivery at startup and on each report poll, pending lead launches are reconciled against every page of `worker-list --run <run_id>`.
 A unique dispatch in that Run whose `projection.workspace.id` matches the lead worktree is adopted only if no ledger session or saved stop owns it.
 The dispatch's `taskId`, `dispatchId`, and `agentTerminalHandle` become the lead session identity.
-The launch saves the last prompt key included in its initial context before calling Orca; adoption acknowledges only prompts through that cutoff.
-Later prompts stay pending for forwarding or a replacement lead. Legacy launches without a saved cutoff retain pending prompts for replay, which can repeat context rather than discard it.
+The launch saves its initial prompt cutoff in the same transaction as the launch row, then advances the cutoff if its context includes more prompts before calling Orca.
+Adoption acknowledges only prompts through that cutoff; later prompts stay pending for forwarding or a replacement lead.
+For legacy launch rows without a cutoff, adoption retains the old behavior of acknowledging all prompts pending at adoption so the original request cannot launch a duplicate lead or answer a question.
 Launch cutoffs and stopped partial-dispatch ownership use additive metadata tables; existing launch rows and their table shape remain compatible.
 Reports already stored for that identity return to normal delivery, including reports marked sent before the session was known.
-Reports for identities that have not been adopted stay pending, and saved stops replay before a matching report can publish.
+Reports for identities that have not been adopted stay pending only while a launch has an unknown or matching dispatch identity; otherwise they are acknowledged and ignored.
+Saved stops replay before a matching report can publish.
 Background reconciliation and input replay skip threads busy with a live launch so other threads continue polling.
 If complete worker lists still show no matching dispatch after a 60-second grace, a launch with no saved dispatch identity is cleared so pending input can start a lead again.
 The grace starts at the first complete list without a match and restarts after a Bridge restart; it matches the Orca command timeout.
