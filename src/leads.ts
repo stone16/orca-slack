@@ -173,6 +173,7 @@ export class Leads {
   }
   async reconcile(): Promise<void> {
     for (const launch of this.store.pendingLeadLaunches()) {
+      if (this.queues.has(launch.threadId)) continue;
       await this.serial(launch.threadId, async () => {
         if (this.store.pendingLaunch(launch.threadId) !== launch.id) return;
         const dispatchId = this.store.launchDispatch(launch.threadId);
