@@ -20,7 +20,7 @@ The caller supplies these [`AdapterOptions`](../src/bolt.ts#L17) members:
 | `allowedUsers` | The configured Slack user allowlist. |
 | `botId` | The Slack bot user ID used in mentions. |
 | `leads`, `unboundThreads` | Optional existing collaborators passed through to Bridge. |
-| `handle(work)` | Optional lifecycle gate that tracks incoming handlers and drains them at shutdown. |
+| `handle(work)` | Optional lifecycle gate around Bolt processing before acknowledgment. Admitted deliveries drain at shutdown. |
 | `statusView(threadId)` | Read the current plain status view, or return `undefined` before a view exists. Do not publish cards from this callback. |
 | `ownerAction(action)` | Execute an authorized retry, repository switch, or cleanup. |
 | `logTail(threadId)` | Read the thread's log tail for the modal. |
