@@ -50,6 +50,7 @@ export class Runtime {
   private connectedOnce = false;
   private log: Log;
   private prQueue: Promise<void> = Promise.resolve();
+  private reportQueue: Promise<void> = Promise.resolve();
   constructor(private config: Config, private options: RuntimeOptions = {}) {
     this.log = options.log ?? redactingLog(process.env);
     const boundary = options.run ?? command(config.coordinatorTerminal);
@@ -119,14 +120,14 @@ export class Runtime {
     try { await this.socket.app.start(); }
     catch { throw new Error('Slack startup failed; check SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and botId'); }
     if (this.stopping) return;
-    this.repeat(5_000, async () => { await this.reports.poll(); await this.leads.poll(); await this.socket!.adapter.replay(); await this.refresh(); });
+    this.repeat(5_000, () => this.pollReports());
     this.repeat(60_000, () => this.pollPullRequests());
     this.repeat(3_600_000, () => this.retain());
     this.log('info', 'bridge ready');
   }
   private connected = () => {
     this.log('info', 'Socket Mode connected');
-    if (this.connectedOnce) void this.work(() => this.socket!.adapter.replay()).catch(error => this.log('error', error));
+    if (this.connectedOnce) void this.work(() => this.pollReports()).catch(error => this.log('error', error));
     this.connectedOnce = true;
   };
   private reconnecting = () => { this.log('warn', 'Socket Mode reconnecting'); };
@@ -138,6 +139,16 @@ export class Runtime {
       busy = true;
       void this.work(job).catch(error => this.log('error', error)).finally(() => { busy = false; });
     }, milliseconds));
+  }
+  private pollReports(): Promise<void> {
+    const result = this.reportQueue.catch(() => {}).then(async () => {
+      await this.reports.poll();
+      await this.leads.poll();
+      await this.socket!.adapter.replay();
+      await this.refresh();
+    });
+    this.reportQueue = result;
+    return result;
   }
   private pollPullRequests(threadId?: string): Promise<void> {
     const result = this.prQueue.catch(() => {}).then(async () => {

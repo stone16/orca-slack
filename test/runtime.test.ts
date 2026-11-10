@@ -397,3 +397,18 @@ test('unexpected Socket Mode reconnects produce an operational log line', async 
   const f = fixture(); await f.runtime.start(); f.socket.emit('reconnecting');
   expect(f.logs).toContain('warn Socket Mode reconnecting');
 });
+
+test('reconnect processes a recovered completion before replaying a queued follow-up', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  f.control.failSend = true;
+  await expect(f.adapter().event({ installationId: 'A:T', eventId: 'queued', channel: 'C1', ts: '3', threadTs: '1', user: f.config.ownerId, text: 'Queued while disconnected' })).rejects.toThrow();
+  f.control.failSend = false; f.addReport('worker_done', 'succeeded');
+  f.socket.emit('reconnecting'); f.socket.emit('connected'); await vi.advanceTimersByTimeAsync(0);
+  const store = new Store(f.file);
+  try {
+    expect(store.activeLeads()[0]?.dispatchId).toBe('new-dispatch');
+    expect(store.inbound('thread').find(message => message.eventId === 'queued')?.state).toBe('forwarded');
+    expect(f.commands.filter(command => command.args[1] === 'send' && command.args.includes('Queued while disconnected'))).toHaveLength(1);
+  } finally { store.close(); }
+});
