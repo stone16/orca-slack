@@ -645,3 +645,36 @@ test.each(['succeeded', 'failed', 'question'])('R1 legacy adoption acknowledges 
     else expect(f.posts.filter(post => String(post.text).includes('Legacy report'))).toHaveLength(1);
   } finally { store.close(); }
 });
+
+test.each(['sequenced', 'unsequenced'])('R2 an unowned %s report without a pending launch is acknowledged once and preserves idle polling', async sequence => {
+  vi.useFakeTimers();
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.persistReports(f.config.runId, [{ id: 'unowned-report', type: 'worker_done', body: 'Unowned result',
+      payload: JSON.stringify({ dispatchId: 'unowned', taskId: 'unowned-task', outcome: 'succeeded' }),
+      ...(sequence === 'sequenced' ? { sequence: 1 } : {}) }]);
+    await f.runtime.start();
+    expect(store.pendingLeadLaunches()).toEqual([]);
+    expect(store.reports(f.config.runId)[0].state).toBe('sent');
+    const reads = f.commands.filter(command => command.args[1] === 'inbox').length;
+    f.pause('after-send');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.paused()).toBe(false);
+    expect(f.commands.filter(command => command.args[1] === 'inbox')).toHaveLength(reads);
+    expect(f.posts.map(post => post.text).join('\n')).not.toContain('Unowned result');
+  } finally { f.release(); store.close(); }
+});
+
+test('R2 a launch for a different known dispatch does not defer an unowned report', async () => {
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.endLead('session');
+    store.beginLeadLaunch('thread', 'pending-launch', store.inbound('thread')[0].key);
+    store.saveLaunchDispatch('thread', 'different-dispatch');
+    f.addReport('worker_done', 'succeeded', 'Unrelated result', { dispatchId: 'unowned', taskId: 'unowned-task' });
+    await f.runtime.start();
+    expect(store.pendingLaunch('thread')).toBe('pending-launch');
+    expect(store.reports(f.config.runId)[0].state).toBe('sent');
+    expect(f.posts.map(post => post.text).join('\n')).not.toContain('Unrelated result');
+  } finally { store.close(); }
+});
