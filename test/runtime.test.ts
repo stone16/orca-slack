@@ -115,7 +115,8 @@ test('runtime composes the modules, replays once, and schedules report, PR, lead
   expect(f.logs.filter(line => line.includes('retention complete'))).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(60_000);
   expect(f.commands.filter(command => command.program === 'gh')).toHaveLength(2);
-  expect(f.commands.filter(command => command.args[1] === 'worker-show').length).toBeGreaterThan(1);
+  expect(f.commands.filter(command => command.args[1] === 'worker-show')).toHaveLength(13);
+  expect(f.commands.filter(command => command.args[1] === 'check')).toHaveLength(24);
   expect(f.commands.filter(command => command.args[1] === 'send')).toHaveLength(1);
   expect(f.logs.filter(line => line.includes('startup replay complete'))).toHaveLength(1);
   await f.runtime.stop();
