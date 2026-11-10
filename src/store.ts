@@ -113,6 +113,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS slack_reactions (
         inboundKey TEXT NOT NULL REFERENCES inbound(key), name TEXT NOT NULL,
         PRIMARY KEY(inboundKey, name));
+      CREATE TABLE IF NOT EXISTS retry_requests (
+        threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, user TEXT NOT NULL,
+        afterSessionId TEXT NOT NULL REFERENCES lead_sessions(id), promptKey TEXT NOT NULL REFERENCES inbound(key),
+        PRIMARY KEY(threadId, key));
       CREATE TABLE IF NOT EXISTS slack_actions (
         threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, user TEXT NOT NULL,
         PRIMARY KEY(threadId, key));`);
@@ -144,14 +148,24 @@ export class Store {
   }
   requestRetry(threadId: string, key: string, user: string): void {
     this.transaction(() => {
-      if (this.slackAction(threadId, key)) return;
-      if (this.thread(threadId)?.owner !== user || this.leadSessions(threadId).some(session => session.active) ||
-          this.leadEvents(threadId).at(-1)?.kind !== 'failed') throw new Error('Retry requires a failed, inactive lead');
-      const message = this.inbound(threadId).filter(message => message.kind === 'prompt').at(-1);
+      if (this.thread(threadId)?.owner !== user) throw new Error('Only the owner can retry');
+      if (this.slackAction(threadId, key) || this.db.prepare('SELECT 1 FROM retry_requests WHERE threadId=? AND key=?').get(threadId, key)) return;
+      const failed = this.leadEvents(threadId).at(-1);
+      if (this.leadSessions(threadId).some(session => session.active) || failed?.kind !== 'failed' || !failed.sessionId) {
+        throw new Error('Retry requires a failed, inactive lead');
+      }
+      const message = this.inbound(threadId).filter(message => message.kind === 'prompt' && message.state !== 'archived').at(-1);
       if (!message) throw new Error('Retry has no saved prompt');
+      this.db.prepare('INSERT INTO retry_requests VALUES (?, ?, ?, ?, ?)').run(threadId, key, user, failed.sessionId, message.key);
       this.db.prepare("UPDATE inbound SET state='pending' WHERE key=?").run(message.key);
-      this.saveSlackAction(threadId, key, user);
     });
+  }
+  retryStarted(threadId: string, key: string): boolean {
+    const request = this.db.prepare('SELECT afterSessionId FROM retry_requests WHERE threadId=? AND key=?').get(threadId, key);
+    if (!request) return false;
+    const sessions = this.leadSessions(threadId);
+    const previous = sessions.findIndex(session => session.id === request.afterSessionId);
+    return previous >= 0 && previous < sessions.length - 1;
   }
   findThread(channel: string, threadTs: string): Thread | undefined {
     const row = this.db.prepare('SELECT id FROM threads WHERE channel=? AND threadTs=?').get(channel, threadTs);

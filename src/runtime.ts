@@ -101,9 +101,6 @@ export class Runtime {
     }, this.log);
     this.socket.socket.on('connected', this.connected);
     this.socket.socket.on('disconnected', this.disconnected);
-    try { await this.socket.app.start(); }
-    catch { throw new Error('Slack startup failed; check SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and botId'); }
-    if (this.stopping) return;
     const pendingReports = this.store.reports(this.config.runId).filter(report => report.state === 'pending').length;
     const coverage = await this.reports.recover();
     this.log(coverage.state === 'complete' ? 'info' : 'warn', `Orca inbox reconciled coverage=${coverage.state} count=${coverage.count}`);
@@ -115,6 +112,9 @@ export class Runtime {
     await this.leads.poll();
     await this.refresh();
     await this.retain();
+    if (this.stopping) return;
+    try { await this.socket.app.start(); }
+    catch { throw new Error('Slack startup failed; check SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and botId'); }
     if (this.stopping) return;
     this.repeat(5_000, async () => { await this.reports.poll(); await this.leads.poll(); await this.refresh(); });
     this.repeat(60_000, () => this.pollPullRequests());
@@ -198,7 +198,8 @@ export class Runtime {
     if (action.actionId === 'retry') {
       if (!action.operationKey) throw new Error('Retry requires an operation key');
       this.store.requestRetry(action.threadId, action.operationKey, action.user);
-      await this.leads.forward(action.threadId);
+      if (!this.store.retryStarted(action.threadId, action.operationKey)) await this.leads.forward(action.threadId);
+      if (!this.store.retryStarted(action.threadId, action.operationKey)) throw new Error('Retry launch is not confirmed; the saved request remains pending');
     } else if (action.actionId === 'cleanup') {
       const refused: string[] = [];
       for (const tree of this.store.trackedWorktrees(action.threadId)) {

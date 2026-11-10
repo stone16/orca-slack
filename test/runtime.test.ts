@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events';
+import { App, type ReceiverEvent } from '@slack/bolt';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
-import { SlackAdapter, type AdapterOptions, type SlackClient } from '../src/bolt.js';
+import { SlackAdapter, registerHandlers, type AdapterOptions, type SlackClient } from '../src/bolt.js';
 import { parseConfig } from '../src/config.js';
 import { Runtime } from '../src/runtime.js';
 import { Store } from '../src/store.js';
@@ -16,7 +17,7 @@ afterEach(async () => {
   vi.useRealTimers();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true });
 });
-function fixture() {
+function fixture(realBolt = false) {
   const root = mkdtempSync(join(tmpdir(), 'bridge-runtime-'));
   roots.push(root);
   const checkout = join(root, 'bridge'), archive = join(root, 'archive');
@@ -37,7 +38,7 @@ function fixture() {
   store.saveInbound(thread, { installationId: 'A:T', eventId: 'event', channel: 'C1', ts: '2', threadTs: '1', user: config.ownerId, text: 'example Follow up' }, 'prompt');
   store.close();
   const commands: { program: string; args: string[] }[] = [];
-  const control = { prState: 'OPEN', worktreePresent: true };
+  const control = { prState: 'OPEN', worktreePresent: true, failStart: false };
   const treePath = join(root, 'worktree'); mkdirSync(treePath);
   const messages: { id: string; type: string; sequence: number; payload: string; body: string }[] = [];
   let unread = false;
@@ -54,6 +55,7 @@ function fixture() {
     if (args[0] === 'worktree' && args[1] === 'ps') result = { truncated: false, worktrees: control.worktreePresent ? [{ worktreeId: 'tree', worktreeInstanceId: 'instance', hostId: 'local', agents: [{ liveness: 'exited' }], unverifiableTerminalCount: 0 }] : [] };
     if (args[0] === 'worktree' && args[1] === 'show') result = { worktree: { id: 'tree', instanceId: 'instance', identity: { key: 'identity' }, hostId: 'local', path: treePath, isMainWorktree: false } };
     if (args[0] === 'worktree' && args[1] === 'rm') { rmSync(treePath, { recursive: true }); control.worktreePresent = false; }
+    if (args[1] === 'worker-start' && control.failStart) throw new Error('scripted start unavailable');
     if (args[1] === 'worker-start') result = { dispatchId: 'new-dispatch', taskId: 'new-task', runId: config.runId, effects: [{ kind: 'terminal', role: 'agent', id: 'new-handle' }] };
     if (args[1] === 'inbox') result = { count: messages.length, messages };
     if (args[1] === 'check') {
@@ -71,6 +73,7 @@ function fixture() {
     postMessage: async args => { posts.push({ ...args }); return { ts: `${++sequence}` }; },
     update: async args => { posts.push({ ...args }); }, postEphemeral: async () => {},
   }, reactions: { add: async args => { reactions.push(args.name); } }, views: { open: async () => {} } };
+  let bolt: App | undefined;
   let options!: AdapterOptions;
   let adapter!: SlackAdapter;
   let release: (() => void) | undefined;
@@ -84,13 +87,18 @@ function fixture() {
     socketMode: (store, supplied) => {
       options = supplied;
       adapter = new SlackAdapter(client, store, supplied);
-      return { adapter, socket: new EventEmitter(), app: {
-        start: async () => { lifecycle.push('connected'); }, stop: async () => { lifecycle.push('disconnected'); },
-      } };
+      const receiver = { init: () => {}, start: async () => { lifecycle.push('connected'); }, stop: async () => { lifecycle.push('disconnected'); } };
+      if (realBolt) {
+        bolt = new App({ receiver, token: 'fixture-token', botId: 'B1', botUserId: config.botId, tokenVerificationEnabled: false });
+        bolt.error(async error => { logs.push(error.message); });
+        registerHandlers(bolt, adapter, supplied.handle);
+      }
+      return { adapter, socket: new EventEmitter(), app: bolt ?? receiver };
     },
   });
   runtimes.push(runtime);
   return { root, config, file, control, commands, posts, reactions, lifecycle, logs, runtime,
+    receive: (body: ReceiverEvent['body'], ack: () => Promise<void>) => bolt!.processEvent({ body, ack }),
     adapter: () => adapter, options: () => options,
     addReport: (type = 'question', outcome?: string) => { messages.push({ id: 'report', sequence: 1, type, body: 'Choose a color',
       payload: JSON.stringify({ dispatchId: 'dispatch', taskId: 'task', outcome }) }); unread = true; },
@@ -194,5 +202,109 @@ test('owner cleanup uses the composed gh, git, and Orca boundaries and preserves
     expect(f.commands.some(command => command.program === 'git' && command.args.includes('status'))).toBe(true);
     expect(store.cleanupReceipt('tree')).toEqual(expect.objectContaining({ state: 'deleted', confirmedBy: f.config.ownerId, finalCommit: 'a'.repeat(40) }));
     expect(JSON.parse(store.slackCard('thread', 'status')!.view).state).toBe('cleaned');
+  } finally { store.close(); }
+});
+
+
+for (const kind of ['message', 'button']) {
+  test(`an acknowledged ${kind} drains through the real Bolt boundary when shutdown begins in ack`, async () => {
+    const f = fixture(true); await f.runtime.start();
+    const store = new Store(f.file);
+    let stopping: Promise<void> | undefined;
+    let acked = false;
+    try {
+      let body: ReceiverEvent['body'];
+      if (kind === 'message') body = { type: 'event_callback', api_app_id: 'A', team_id: 'T', event_id: 'during-stop',
+        event: { type: 'message', channel: 'C1', user: f.config.ownerId, ts: '3', thread_ts: '1', text: 'Saved during stop' } };
+      else {
+        body = JSON.parse(readFileSync(new URL('./fixtures/slack-action.json', import.meta.url), 'utf8'));
+        body.channel = { id: 'C1', name: 'fixture' }; body.user = { id: f.config.ownerId };
+        body.message = { ts: store.slackCard('thread', 'status')!.ts };
+        body.actions = [{ type: 'button', action_id: 'stop', value: JSON.stringify({ threadId: 'thread' }) }];
+      }
+      await f.receive(body, async () => { acked = true; stopping = f.runtime.stop(); });
+      await stopping;
+      expect(acked).toBe(true);
+      if (kind === 'message') expect(store.inbound('thread')).toContainEqual(expect.objectContaining({ eventId: 'during-stop', text: 'Saved during stop' }));
+      else expect(store.leadEvents('thread')).toContainEqual(expect.objectContaining({ kind: 'stopped' }));
+    } finally { store.close(); }
+  });
+}
+
+test('startup reconciles completion and replays the pending prompt before Socket Mode accepts traffic', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); f.addReport('worker_done', 'succeeded'); f.pause('after-inbox');
+  const starting = f.runtime.start();
+  await vi.advanceTimersByTimeAsync(0);
+  try { expect(f.paused()).toBe(true); expect(f.lifecycle).toEqual([]); }
+  finally { f.release(); await starting; }
+  expect(f.lifecycle).toEqual(['connected']);
+  expect(f.commands.filter(command => command.args[1] === 'send')).toHaveLength(0);
+  expect(f.commands.filter(command => command.args[1] === 'worker-start')).toHaveLength(1);
+  const store = new Store(f.file);
+  try { expect(store.inbound('thread')[0].state).toBe('forwarded'); expect(store.activeLeads()[0].dispatchId).toBe('new-dispatch'); }
+  finally { store.close(); }
+});
+
+
+test('the real Bolt boundary leaves new traffic unacknowledged once shutdown has closed admission', async () => {
+  const f = fixture(true); await f.runtime.start(); await f.runtime.stop();
+  let acked = false;
+  await f.receive({ type: 'event_callback', api_app_id: 'A', team_id: 'T', event_id: 'after-stop',
+    event: { type: 'message', channel: 'C1', user: f.config.ownerId, ts: '4', thread_ts: '1', text: 'Redeliver later' } }, async () => { acked = true; });
+  expect(acked).toBe(false);
+});
+
+
+test('an unconfirmed retry launch keeps its action available on repeated owner clicks', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  f.addReport('worker_done', 'failed'); await vi.advanceTimersByTimeAsync(5_000);
+  const store = new Store(f.file); f.control.failStart = true;
+  const click = { actionId: 'retry', value: JSON.stringify({ threadId: 'thread', resultId: 'report' }), channel: 'C1',
+    user: f.config.ownerId, messageTs: store.slackCard('thread', 'result:report')!.ts, triggerId: 'trigger' };
+  try {
+    await expect(f.adapter().action(click)).rejects.toThrow();
+    expect(store.slackAction('thread', JSON.stringify(['result:report', 'retry', '']))).toBeUndefined();
+    await expect(f.adapter().action(click)).rejects.toThrow('Retry launch is not confirmed');
+    expect(JSON.parse(store.slackCard('thread', 'result:report')!.view).retriedBy).toBeUndefined();
+    expect(store.inbound('thread')[0].state).toBe('pending');
+    expect(f.commands.filter(command => command.args[1] === 'worker-start')).toHaveLength(1);
+  } finally { store.close(); }
+});
+
+test('owner retry skips an archived empty mention and requeues the last real prompt', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  await f.adapter().event({ installationId: 'A:T', eventId: 'empty', channel: 'C1', ts: '3', threadTs: '1', user: f.config.ownerId, text: `<@${f.config.botId}>` });
+  f.addReport('worker_done', 'failed'); await vi.advanceTimersByTimeAsync(5_000);
+  const store = new Store(f.file);
+  try {
+    await f.adapter().action({ actionId: 'retry', value: JSON.stringify({ threadId: 'thread', resultId: 'report' }), channel: 'C1',
+      user: f.config.ownerId, messageTs: store.slackCard('thread', 'result:report')!.ts, triggerId: 'trigger' });
+    expect(f.commands.filter(command => command.args[1] === 'worker-start')).toHaveLength(1);
+    expect(store.inbound('thread').find(message => message.eventId === 'empty')?.state).toBe('archived');
+    expect(store.activeLeads()[0].dispatchId).toBe('new-dispatch');
+  } finally { store.close(); }
+});
+
+
+test('retry intent survives reopening and recognizes a completed replacement without requeueing it', () => {
+  const f = fixture();
+  let store = new Store(f.file);
+  try {
+    store.markInboundForwarded(store.inbound('thread')[0].key);
+    store.recordLeadEvent({ threadId: 'thread', key: 'failed', sessionId: 'session', kind: 'failed', text: 'Failed' }, 'session');
+    store.requestRetry('thread', 'retry-key', f.config.ownerId);
+    expect(store.slackAction('thread', 'retry-key')).toBeUndefined();
+    store.close(); store = new Store(f.file);
+    expect(store.inbound('thread')[0].state).toBe('pending');
+    store.completeLeadLaunch({ id: 'replacement', threadId: 'thread', worktreeId: 'tree', runId: f.config.runId,
+      taskId: 'replacement-task', dispatchId: 'replacement-dispatch', handle: 'replacement-handle' }, [store.inbound('thread')[0].key]);
+    store.endLead('replacement');
+    store.requestRetry('thread', 'retry-key', f.config.ownerId);
+    expect(store.retryStarted('thread', 'retry-key')).toBe(true);
+    expect(store.inbound('thread')[0].state).toBe('forwarded');
+    expect(store.leadSessions('thread')).toHaveLength(2);
   } finally { store.close(); }
 });
