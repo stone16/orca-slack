@@ -19,17 +19,19 @@ The caller supplies these [`AdapterOptions`](../src/bolt.ts#L17) members:
 | `orca` | The existing Orca port. |
 | `allowedUsers` | The configured Slack user allowlist. |
 | `botId` | The Slack bot user ID used in mentions. |
+| `leads`, `unboundThreads` | Optional existing collaborators passed through to Bridge. |
+| `handle(work)` | Optional lifecycle gate that tracks incoming handlers and drains them at shutdown. |
 | `statusView(threadId)` | Read the current plain status view, or return `undefined` before a view exists. Do not publish cards from this callback. |
 | `ownerAction(action)` | Execute an authorized retry, repository switch, or cleanup. |
 | `logTail(threadId)` | Read the thread's log tail for the modal. |
 
-Call `app.start()` to connect, and `app.stop()` to disconnect. This slice does not start a daemon.
+Call `app.start()` to connect, and `app.stop()` to disconnect. The [runtime](runtime.md) owns these calls for the resident service.
 The returned `socket` is available for connection monitoring in the later daemon task.
 Use [`adapter.replay(threadId?)`](../src/bolt.ts#L154) at startup and after a lead becomes available.
 It replays durable inbound prompts and completes their delivery reactions, including prompts forwarded by a later message.
 
 Call [`adapter.status(view)`](../src/bolt.ts#L81), [`adapter.decision(view)`](../src/bolt.ts#L100), and [`adapter.result(view)`](../src/bolt.ts#L120) to publish the three message types.
-The thread must already exist in Store. Decision publication also saves the options and Slack timestamp for the existing Bridge authorization path.
+The thread must already exist in Store. Decision publication also saves the options and Slack timestamp for the existing Bridge authorization path. When Leads already saved the decision, publication fills in its delivered Slack timestamp.
 Result IDs must identify the report, so replay updates its existing message rather than creating another result.
 The caller must keep owner-action handlers idempotent across a crash after an external effect and before its local receipt.
 For button actions, `action.operationKey` identifies that operation and remains stable across UI retries.
