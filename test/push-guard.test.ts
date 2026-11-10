@@ -232,3 +232,32 @@ test.each(['refs/replace/0123456789012345678901234567890123456789', 'refs/notes/
     expect(result.output).toContain('Unsupported ref namespace');
     expect(git(remote, 'show-ref', '--verify', ref).status).not.toBe(0);
   });
+
+test.each(['prunable', 'missing', 'prunable directory'])('installation skips a %s worktree and still rejects a direct push to main', stale => {
+  const { root, repository, remote, worktree, hooksDirectory } = fixture();
+  run(repository, 'push', 'origin', 'HEAD:refs/heads/main');
+  run(remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  if (stale === 'missing') run(repository, 'worktree', 'lock', worktree);
+  if (stale === 'prunable directory') rmSync(join(worktree, '.git'));
+  else rmSync(worktree, { recursive: true });
+  const listing = run(repository, 'worktree', 'list', '--porcelain');
+  expect(listing).toContain(worktree);
+  expect(listing.includes('prunable')).toBe(stale !== 'missing');
+  expect(() => installPushGuard(repository, hooksDirectory)).not.toThrow();
+  expect(run(repository, 'config', '--get', 'core.hooksPath')).toBe(hooksDirectory);
+  run(repository, 'commit', '--allow-empty', '-m', 'test: guarded main update');
+  const result = git(repository, 'push', 'origin', 'HEAD:refs/heads/main');
+  evidence(root, `stale ${stale} worktree, git push origin HEAD:refs/heads/main`, result);
+  expect(result.status, result.output).not.toBe(0);
+  expect(result.output).toContain('Default branch updates are blocked');
+});
+
+test('installation still fails on other git errors in an existing worktree', () => {
+  const { repository, worktree, hooksDirectory } = fixture();
+  run(repository, 'config', '--local', 'extensions.worktreeConfig', 'true');
+  const gitDirectory = run(worktree, 'rev-parse', '--absolute-git-dir');
+  writeFileSync(join(gitDirectory, 'config.worktree'), '[broken');
+  expect(() => installPushGuard(repository, hooksDirectory)).toThrow();
+  expect(existsSync(hooksDirectory)).toBe(false);
+  expect(git(repository, 'config', '--get', 'core.hooksPath').status).toBe(1);
+});
