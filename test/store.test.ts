@@ -118,7 +118,7 @@ test('B1 launch cutoffs preserve legacy rows and the original launch table shape
     const thread = store.thread('thread')!;
     for (const ts of ['1', '2']) store.saveInbound(thread, { installationId: 'app', eventId: ts, channel: 'C1', ts,
       user: 'owner', text: `Prompt ${ts}` }, 'prompt');
-    expect(store.launchPromptKeys('thread')).toEqual([]);
+    expect(store.launchPromptKeys('thread')).toEqual(store.inbound('thread').map(message => message.key));
     expect(store.inbound('thread').map(message => message.state)).toEqual(['pending', 'pending']);
     store.finishLeadLaunch('thread');
     const oldWriter = new DatabaseSync(file);
@@ -128,7 +128,7 @@ test('B1 launch cutoffs preserve legacy rows and the original launch table shape
     store.saveLaunchPrompt('thread', firstKey);
     store.close(); store = new Store(file);
     expect(store.launchPromptKeys('thread')).toEqual([firstKey]);
-    store.finishLeadLaunch('thread'); store.beginLeadLaunch('thread', 'fresh-launch');
-    expect(store.launchPromptKeys('thread')).toEqual([]);
+    store.finishLeadLaunch('thread'); store.beginLeadLaunch('thread', 'fresh-launch', store.inbound('thread')[1].key);
+    expect(store.launchPromptKeys('thread')).toEqual(store.inbound('thread').map(message => message.key));
   } finally { store.close(); }
 });

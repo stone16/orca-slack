@@ -515,7 +515,7 @@ test('R2 SF1 launch settlement replaces an interrupted session and scopes interr
   await h.orca.call('worker-start', ['--run', 'run', '--worktree', 'id:tree-1', '--agent', 'codex', '--spec', 'Authorized replacement']);
   const session = { id: 'replacement', threadId, worktreeId: 'tree-1', runId: 'run',
     taskId: 'task-2', dispatchId: 'dispatch-2', handle: 'handle-2' };
-  h.store.beginLeadLaunch(threadId, session.id);
+  h.store.beginLeadLaunch(threadId, session.id, h.store.inbound(threadId).at(-1)!.key);
   h.store.saveLaunchDispatch(threadId, session.dispatchId);
   expect(() => h.store.completeLeadLaunch(session, [])).not.toThrow();
   expect(h.store.leadSessions(threadId).map(row => [row.dispatchId, row.active])).toEqual([['dispatch-1', false], ['dispatch-2', true]]);
@@ -526,7 +526,7 @@ test('R2 SF1 launch settlement replaces an interrupted session and scopes interr
   await h.leads.poll();
   expect(argument(calls(h.commands, 'send')[0], '--to')).toBe('dispatch:dispatch-2');
   expect(h.store.leadEvents(threadId).at(-1)).toMatchObject({ sessionId: session.id, kind: 'running' });
-  h.store.beginLeadLaunch(threadId, 'rejected');
+  h.store.beginLeadLaunch(threadId, 'rejected', h.store.inbound(threadId).at(-1)!.key);
   expect(() => h.store.completeLeadLaunch({ ...session, id: 'rejected', dispatchId: 'dispatch-3', worktreeId: 'missing-tree' }, [])).toThrow();
   expect(h.store.leadSessions(threadId).map(row => [row.dispatchId, row.active])).toEqual([['dispatch-1', false], ['dispatch-2', true]]);
   expect(h.store.pendingLaunch(threadId)).toBe('rejected');

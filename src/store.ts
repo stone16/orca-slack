@@ -332,17 +332,22 @@ export class Store {
       .map(({ dispatchId, ...row }) => ({ ...row, ...(dispatchId === null ? {} : { dispatchId }) })) as
       { threadId: string; id: string; dispatchId?: string }[];
   }
-  beginLeadLaunch(threadId: string, id: string): void {
-    this.db.prepare('INSERT INTO lead_launches(threadId, id) VALUES (?, ?)').run(threadId, id);
+  beginLeadLaunch(threadId: string, id: string, promptKey: string): void {
+    this.transaction(() => {
+      this.db.prepare('INSERT INTO lead_launches(threadId, id) VALUES (?, ?)').run(threadId, id);
+      this.saveLaunchPrompt(threadId, promptKey);
+    });
   }
   saveLaunchPrompt(threadId: string, promptKey: string): void {
     this.db.prepare(`INSERT INTO lead_launch_prompts VALUES (?, ?)
       ON CONFLICT(threadId) DO UPDATE SET promptKey=excluded.promptKey`).run(threadId, promptKey);
   }
   launchPromptKeys(threadId: string): string[] {
-    return this.db.prepare(`SELECT key FROM inbound WHERE threadId=? AND kind='prompt' AND state='pending'
-      AND rowid <= (SELECT i.rowid FROM inbound i JOIN lead_launch_prompts l ON l.promptKey=i.key
-        WHERE l.threadId=? AND i.threadId=l.threadId) ORDER BY rowid`).all(threadId, threadId).map(row => row.key as string);
+    return this.db.prepare(`SELECT i.key FROM inbound i JOIN lead_launches l ON l.threadId=i.threadId
+      LEFT JOIN lead_launch_prompts p ON p.threadId=l.threadId
+      WHERE i.threadId=? AND i.kind='prompt' AND i.state='pending'
+      AND (p.promptKey IS NULL OR i.rowid <= (SELECT rowid FROM inbound WHERE key=p.promptKey AND threadId=l.threadId))
+      ORDER BY i.rowid`).all(threadId).map(row => row.key as string);
   }
   saveLaunchDispatch(threadId: string, dispatchId: string): void {
     this.db.prepare('UPDATE lead_launches SET dispatchId=? WHERE threadId=?').run(dispatchId, threadId);
