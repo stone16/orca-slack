@@ -136,6 +136,23 @@ export class Store {
     const { linearTicket, ...thread } = row;
     return { ...thread, ...(linearTicket === null ? {} : { linearTicket }) } as Thread;
   }
+  threads(): Thread[] {
+    return this.db.prepare('SELECT id FROM threads ORDER BY rowid').all().map(row => this.thread(row.id as string)!);
+  }
+  setDecisionSlackTs(id: string, ts: string): void {
+    this.db.prepare('UPDATE decisions SET slackTs=? WHERE id=?').run(ts, id);
+  }
+  requestRetry(threadId: string, key: string, user: string): void {
+    this.transaction(() => {
+      if (this.slackAction(threadId, key)) return;
+      if (this.thread(threadId)?.owner !== user || this.leadSessions(threadId).some(session => session.active) ||
+          this.leadEvents(threadId).at(-1)?.kind !== 'failed') throw new Error('Retry requires a failed, inactive lead');
+      const message = this.inbound(threadId).filter(message => message.kind === 'prompt').at(-1);
+      if (!message) throw new Error('Retry has no saved prompt');
+      this.db.prepare("UPDATE inbound SET state='pending' WHERE key=?").run(message.key);
+      this.saveSlackAction(threadId, key, user);
+    });
+  }
   findThread(channel: string, threadTs: string): Thread | undefined {
     const row = this.db.prepare('SELECT id FROM threads WHERE channel=? AND threadTs=?').get(channel, threadTs);
     return row ? this.thread(row.id as string) : undefined;

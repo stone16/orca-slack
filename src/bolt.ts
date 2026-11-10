@@ -1,4 +1,6 @@
 import { App, LogLevel, SocketModeReceiver, type BlockAction, type Logger } from '@slack/bolt';
+import type { Leads } from './leads.js';
+import type { UnboundThreads } from './unbound-threads.js';
 import type { Orca } from './orca.js';
 import { Bridge, type Action, type SlackEvent } from './slack.js';
 import { Store, type SlackCard } from './store.js';
@@ -16,6 +18,7 @@ export interface SlackClient {
 }
 export interface AdapterOptions {
   orca: Orca; allowedUsers: readonly string[]; botId: string;
+  leads?: Leads; unboundThreads?: UnboundThreads; handle?: (work: () => Promise<void>) => Promise<void>;
   statusView(threadId: string): StatusView | undefined | Promise<StatusView | undefined>;
   ownerAction(action: Exclude<Action, { actionId: 'log-tail' }>): Promise<void>;
   logTail(threadId: string): Promise<string>;
@@ -28,7 +31,7 @@ export class SlackAdapter {
   readonly bridge: Bridge;
   private queues = new Map<string, Promise<unknown>>();
   constructor(private slack: SlackClient, private store: Store, private options: AdapterOptions) {
-    this.bridge = new Bridge(options.orca, this, store, options.allowedUsers, options.botId);
+    this.bridge = new Bridge(options.orca, this, store, options.allowedUsers, options.botId, undefined, options.leads, options.unboundThreads);
   }
   private serial<T>(key: string, work: () => Promise<T>): Promise<T> {
     const result = (this.queues.get(key) ?? Promise.resolve()).catch(() => {}).then(work);
@@ -105,6 +108,7 @@ export class SlackAdapter {
       }
       const ts = await this.publish(view.threadId, `decision:${view.id}`, () => this.decisionView(view), renderDecision);
       if (!existing) this.store.saveDecision({ id: view.id, threadId: view.threadId, options: view.options, slackTs: ts });
+      else this.store.setDecisionSlackTs(view.id, ts);
       return ts;
     });
   }
@@ -224,23 +228,24 @@ export class SlackAdapter {
   }
 }
 
-export function registerHandlers(app: App, adapter: SlackAdapter): void {
+export function registerHandlers(app: App, adapter: SlackAdapter,
+  handle: (work: () => Promise<void>) => Promise<void> = work => work()): void {
   for (const type of ['message', 'app_mention'] as const) {
     app.event(type, async ({ event, body }) => {
       if (('subtype' in event && event.subtype && !['file_share', 'thread_broadcast'].includes(event.subtype)) ||
           'bot_id' in event || !('user' in event) || !event.user || !('text' in event) || typeof event.text !== 'string' ||
           !('ts' in event) || !event.ts || !('channel' in event) || !event.channel ||
           !body.api_app_id || !(body.team_id || body.enterprise_id) || !body.event_id) return;
-      await adapter.event({ installationId: `${body.api_app_id}:${body.team_id || body.enterprise_id}`,
-        eventId: body.event_id, channel: event.channel, ts: event.ts,
-        threadTs: 'thread_ts' in event ? event.thread_ts : undefined, user: event.user, text: event.text });
+      await handle(() => adapter.event({ installationId: `${body.api_app_id}:${body.team_id || body.enterprise_id}`,
+        eventId: body.event_id!, channel: event.channel, ts: event.ts,
+        threadTs: 'thread_ts' in event ? event.thread_ts : undefined, user: event.user!, text: event.text! }));
     });
   }
   app.action<BlockAction>(/^(decision_\d+|switch-repository|stop|cleanup|retry|log-tail)$/, async ({ ack, action, body }) => {
     await ack();
     if (!('value' in action) || !action.value || !body.channel || !body.message) return;
-    await adapter.action({ actionId: action.action_id, value: action.value, channel: body.channel.id,
-      user: body.user.id, messageTs: body.message.ts, triggerId: body.trigger_id });
+    await handle(() => adapter.action({ actionId: action.action_id, value: action.value!, channel: body.channel!.id,
+      user: body.user.id, messageTs: body.message!.ts, triggerId: body.trigger_id }));
   });
 }
 
@@ -265,7 +270,7 @@ export function createSocketMode(store: Store, options: AdapterOptions,
   const app = new App({ token, receiver, logger, botUserId: options.botId, tokenVerificationEnabled: false,
     clientOptions: { retryConfig: { retries: 2 }, timeout: 10_000 } });
   const adapter = new SlackAdapter(app.client, store, options);
-  registerHandlers(app, adapter);
+  registerHandlers(app, adapter, options.handle);
   app.error(async error => { logger.error(error); });
   return { app, adapter, socket: receiver.client };
 }
