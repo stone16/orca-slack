@@ -673,3 +673,24 @@ test('reconciliation uses a partial dispatch receipt saved while waiting for the
   expect(h.store.activeLeads()).toMatchObject([{ dispatchId: 'partial-dispatch' }]);
   expect(h.store.pendingLaunch(threadId)).toBeUndefined();
 });
+
+test.each(['running', 'completed'])('B1 adoption preserves post-snapshot prompts for a %s lead', async state => {
+  const h = diskSetup(); h.fail('worker-start');
+  await expect(h.bridge.event(event)).rejects.toThrow('uncertain command');
+  const first = h.store.inbound(threadId)[0];
+  await h.bridge.event({ ...event, eventId: 'after-snapshot', ts: '2', threadTs: '1', text: 'Also use Chinese copy' });
+  h.store.close(); stores.splice(stores.indexOf(h.store), 1);
+  const recovered = setup(h.file);
+  recovered.workerLists({ '': { workers: [listedWorker('recovered')], page: { hasMore: false } } });
+  await recovered.leads.reconcile();
+  expect(recovered.store.inbound(threadId).map(message => [message.key === first.key, message.state])).toEqual([
+    [true, 'forwarded'], [false, 'pending'],
+  ]);
+  if (state === 'completed') await recovered.leads.report(report('worker_done', {
+    dispatchId: 'recovered', taskId: 'task-recovered', outcome: 'succeeded',
+  }));
+  await recovered.bridge.replay();
+  expect(recovered.store.inbound(threadId).at(-1)?.state).toBe('forwarded');
+  if (state === 'running') expect(argument(calls(recovered.commands, 'send')[0], '--body')).toBe('Also use Chinese copy');
+  else expect(argument(calls(recovered.commands, 'worker-start')[0], '--spec')).toContain('Also use Chinese copy');
+});
