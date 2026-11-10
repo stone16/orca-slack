@@ -106,6 +106,7 @@ export class Runtime {
     this.socket.socket.on('disconnected', this.disconnected);
     this.socket.socket.on('reconnecting', this.reconnecting);
     const pendingReports = this.store.reports(this.config.runId).filter(report => report.state === 'pending').length;
+    await this.leads.reconcile();
     const coverage = await this.reports.recover();
     this.log(coverage.state === 'complete' ? 'info' : 'warn', `Orca inbox reconciled coverage=${coverage.state} count=${coverage.count}`);
     if (this.stopping) return;
@@ -142,6 +143,7 @@ export class Runtime {
   }
   private pollReports(): Promise<void> {
     const result = this.reportQueue.catch(() => {}).then(async () => {
+      await this.leads.reconcile();
       await this.reports.poll();
       await this.leads.poll();
       await this.socket!.adapter.replay();
