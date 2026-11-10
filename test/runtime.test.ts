@@ -40,11 +40,12 @@ function fixture(realBolt = false) {
   store.saveInbound(thread, { installationId: 'A:T', eventId: 'event', channel: 'C1', ts: '2', threadTs: '1', user: config.ownerId, text: 'example Follow up' }, 'prompt');
   store.close();
   const commands: { program: string; args: string[] }[] = [];
-  const control = { prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false,
+  const control = { prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false, workerListDelay: 0, terminalStatus: 'running',
     workers: [] as { dispatchId: string; taskId: string; runId: string; agentTerminalHandle: string; projection: { workspace: { id: string } } }[] };
   const treePath = join(root, 'worktree'); mkdirSync(treePath);
   const messages: { id: string; type: string; sequence: number; payload: string; body: string }[] = [];
   let unread = false;
+  let workerListReads = 0;
   const run: RunCommand = async (program, args) => {
     commands.push({ program, args });
     if (program === 'gh') return JSON.stringify([{ number: 7, url: 'https://github.com/example/project/pull/7', state: control.prState, headRefOid: 'a'.repeat(40) }]);
@@ -61,7 +62,7 @@ function fixture(realBolt = false) {
     if (args[1] === 'send' && control.failSend) throw new Error('scripted forwarding unavailable');
     if (args[1] === 'worker-start' && control.failStart) throw new Error('scripted start unavailable');
     if (args[1] === 'worker-start') result = { dispatchId: 'new-dispatch', taskId: 'new-task', runId: config.runId, effects: [{ kind: 'terminal', role: 'agent', id: 'new-handle' }] };
-    if (args[1] === 'worker-list') result = { workers: control.workers, page: { hasMore: false, nextCursor: null } };
+    if (args[1] === 'worker-list') result = { workers: ++workerListReads <= control.workerListDelay ? [] : control.workers, page: { hasMore: false, nextCursor: null } };
     if (args[1] === 'inbox') result = { count: messages.length, messages };
     if (args[1] === 'check') {
       result = { messages: unread ? messages : [] };
@@ -69,7 +70,7 @@ function fixture(realBolt = false) {
     }
     if (args[1] === 'worker-show') result = { projection: { liveness: { verdict: 'live' } }, observation: { agentWait: null } };
     if (args[1] === 'worker-read') result = { source: 'transcript', cursor: '1' };
-    if (args[0] === 'terminal') result = { status: 'running', source: 'terminal', nextCursor: '1' };
+    if (args[0] === 'terminal') result = { status: control.terminalStatus, source: 'terminal', nextCursor: '1' };
     return JSON.stringify({ ok: true, result });
   };
   const posts: Record<string, unknown>[] = [], reactions: string[] = [], lifecycle: string[] = [], logs: string[] = [];
@@ -500,5 +501,21 @@ test('a stored report dropped before adoption is replayed once across further re
     await restarted.stop();
     expect(f.posts.filter(post => String(post.text).includes('Previously dropped result'))).toHaveLength(1);
     expect(store.leadSessions('thread').filter(session => session.dispatchId === worker.dispatchId)).toHaveLength(1);
+  } finally { store.close(); }
+});
+
+test('a completed worker discovered on a later poll replays its report before observing its exited terminal', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); const store = new Store(f.file);
+  try {
+    store.endLead('session');
+    const worker = await killDuringLaunch(f);
+    f.control.workerListDelay = 1;
+    f.control.terminalStatus = 'exited';
+    f.addReport('worker_done', 'succeeded', 'Completed during discovery', worker);
+    await f.runtime.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(f.posts.filter(post => String(post.text).includes('Completed during discovery'))).toHaveLength(1);
+    expect(store.leadEvents('thread').at(-1)?.kind).toBe('completed');
   } finally { store.close(); }
 });
