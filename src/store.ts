@@ -106,6 +106,9 @@ export class Store {
         terminalSource TEXT NOT NULL, terminalCursor TEXT NOT NULL, frozen INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lead_launches (
         threadId TEXT PRIMARY KEY REFERENCES threads(id), id TEXT NOT NULL, dispatchId TEXT);`);
+    if (!this.db.prepare('PRAGMA table_info(lead_launches)').all().some(column => column.name === 'promptKey')) {
+      this.db.exec('ALTER TABLE lead_launches ADD COLUMN promptKey TEXT REFERENCES inbound(key)');
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS slack_cards (
         threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, ts TEXT NOT NULL, view TEXT NOT NULL,
@@ -328,7 +331,15 @@ export class Store {
       { threadId: string; id: string; dispatchId?: string }[];
   }
   beginLeadLaunch(threadId: string, id: string): void {
-    this.db.prepare('INSERT INTO lead_launches VALUES (?, ?, NULL)').run(threadId, id);
+    this.db.prepare('INSERT INTO lead_launches(threadId, id) VALUES (?, ?)').run(threadId, id);
+  }
+  saveLaunchPrompt(threadId: string, promptKey: string): void {
+    this.db.prepare('UPDATE lead_launches SET promptKey=? WHERE threadId=?').run(promptKey, threadId);
+  }
+  launchPromptKeys(threadId: string): string[] {
+    return this.db.prepare(`SELECT key FROM inbound WHERE threadId=? AND kind='prompt' AND state='pending'
+      AND rowid <= (SELECT i.rowid FROM inbound i JOIN lead_launches l ON l.promptKey=i.key
+        WHERE l.threadId=? AND i.threadId=l.threadId) ORDER BY rowid`).all(threadId, threadId).map(row => row.key as string);
   }
   saveLaunchDispatch(threadId: string, dispatchId: string): void {
     this.db.prepare('UPDATE lead_launches SET dispatchId=? WHERE threadId=?').run(dispatchId, threadId);
