@@ -56,12 +56,19 @@ The service uses its identity for Orca calls and recovers that same Run's inbox 
 ## Coordinator rebind
 
 An Orca or Mac restart makes the coordinator terminal handle stale.
-At startup the Bridge rebinds when it has no handle or `orca terminal show` returns `terminal_handle_stale`.
-While running, it rebinds when an Orca call fails with `stable_pane_required` or `terminal_handle_stale`, then retries that call once.
-A rebind creates a `Bridge coordinator` terminal in the checkout that runs `orca orchestration run-use --id <run_id> --json` into the ignored `data/coordinator-bind.json`, and waits up to 60 seconds for a successful receipt for the same Run.
-The new handle is stored in the ledger and used for every later Orca call, including after restarts; the ledger value takes precedence over the config value.
+After installing push guards, startup checks the coordinator with `orca terminal show`.
+It rebinds when it has no handle or the check returns `terminal_handle_stale`; any other check failure waits and retries.
+While running, it rebinds when an Orca call fails with `stable_pane_required`, or with `terminal_handle_stale` from a command that does not name a `--terminal`, then retries that call.
+A stale lead terminal read never triggers a rebind; it keeps the existing lead observation handling.
+Concurrent failures share one rebind, and a call that started with the old handle retries with the new one.
+A rebind creates a `Bridge coordinator` terminal in the checkout that runs `orca orchestration run-use --id <run_id> --json` into its own ignored `data/coordinator-bind-<attempt>.json`, and waits up to 60 seconds for a successful receipt for the same Run in that file.
+The file is removed after each attempt.
+The new handle is stored in the ledger with the config value current at that time, and is used for every later Orca call, including after restarts.
+If `coordinatorTerminal` in the config later changes, the Bridge uses the config value and clears the ledger handle, so an operator binding always wins.
 A failed rebind closes its terminal, logs one `coordinator rebind failed` line, and retries after 5 seconds, doubling to at most 5 minutes.
-Report polls pause quietly during that backoff, and startup waits before reconciling or connecting Socket Mode.
+Report polls and lead observation pause quietly during that backoff, and startup waits before reconciling or connecting Socket Mode.
+Stopping during a rebind closes its terminal without a failure log.
+When the Run is bound to another terminal (`consumer_fenced`), the Bridge never rebinds; it logs one error per backoff step asking to set `coordinatorTerminal` to that terminal and restart.
 The Bridge never creates a Run.
 
 ## Start and stop
