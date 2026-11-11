@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { createSocketMode, type AdapterOptions, type SlackAdapter } from './bolt.js';
@@ -7,6 +7,7 @@ import { Cleanup } from './cleanup.js';
 import { redactingLog, type Config, type Log } from './config.js';
 import type { RunCommand } from './commands.js';
 import { LeadCli } from './lead-orca.js';
+import { parseEnvelope } from './orca.js';
 import { Leads } from './leads.js';
 import { PrPoller } from './pr-poller.js';
 import { installPushGuard } from './push-guard.js';
@@ -25,13 +26,16 @@ export interface RuntimeOptions {
   installGuard?: typeof installPushGuard; checkpoint?: (step: ReportStep) => void | Promise<void>;
 }
 const execute = promisify(execFile);
-function command(coordinatorTerminal: string): RunCommand {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('ORCA_') && !key.startsWith('SLACK_')));
-  env.ORCA_TERMINAL_HANDLE = coordinatorTerminal;
-  return async (program, args) => (await execute(program, args, {
-    env, encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024,
-  })).stdout;
+const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('ORCA_') && !key.startsWith('SLACK_')));
+const command: RunCommand = async (program, args, terminal) => (await execute(program, args, {
+  env: terminal ? { ...env, ORCA_TERMINAL_HANDLE: terminal } : env, encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024,
+})).stdout;
+const STALE = ['stable_pane_required', 'terminal_handle_stale'];
+function failure(error: unknown): { code?: string; message?: string } {
+  try { return parseEnvelope((error as { stdout?: string }).stdout ?? '').error ?? {}; }
+  catch { return { message: error instanceof Error ? error.message : String(error) }; }
 }
+const sleep = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 export class Runtime {
   private store: Store;
@@ -51,20 +55,31 @@ export class Runtime {
   private log: Log;
   private prQueue: Promise<void> = Promise.resolve();
   private reportQueue: Promise<void> = Promise.resolve();
+  private boundary: RunCommand;
+  private terminal?: string;
+  private binding?: Promise<boolean>;
+  private bindFailures = 0;
+  private retryAt = 0;
   constructor(private config: Config, private options: RuntimeOptions = {}) {
     this.log = options.log ?? redactingLog(process.env);
-    const boundary = options.run ?? command(config.coordinatorTerminal);
-    const run: RunCommand = (program, args) => {
+    const boundary = this.boundary = options.run ?? command;
+    const run: RunCommand = async (program, args) => {
       const normalized = [...args];
       if (program === 'gh') {
         const index = normalized.indexOf('--repo') + 1;
         const repository = config.repositories.find(repository => repository.id === normalized[index]);
         if (index > 0 && repository) normalized[index] = repository.github;
       }
-      return boundary(program, normalized);
+      if (program !== 'orca') return boundary(program, normalized);
+      try { return await boundary(program, normalized, this.terminal); }
+      catch (error) {
+        if (!STALE.includes(failure(error).code!) || !(await this.rebind())) throw error;
+        return boundary(program, normalized, this.terminal);
+      }
     };
     mkdirSync(join(config.checkout, 'data'), { recursive: true, mode: 0o700 });
     this.store = new Store(join(config.checkout, 'data', 'bridge.sqlite'));
+    this.terminal = this.store.coordinatorTerminal(config.runId) ?? config.coordinatorTerminal;
     this.orca = new LeadCli(async args => {
       try { return { stdout: await run('orca', args) }; }
       catch (error) { return { stdout: (error as { stdout?: string }).stdout ?? '', failed: true }; }
@@ -91,7 +106,48 @@ export class Runtime {
     if (this.closed || this.stopping) return Promise.reject(new Error('Runtime has stopped'));
     return this.starting ??= this.work(() => this.startup());
   }
+  private rebind(): Promise<boolean> {
+    return this.binding ??= this.bind().finally(() => { this.binding = undefined; });
+  }
+  private async bind(): Promise<boolean> {
+    if (Date.now() < this.retryAt || this.stopping) return false;
+    const file = join(this.config.checkout, 'data', 'coordinator-bind.json');
+    rmSync(file, { force: true });
+    let handle: string | undefined;
+    try {
+      const created = parseEnvelope(await this.boundary('orca', ['terminal', 'create', '--worktree', `path:${this.config.checkout}`,
+        '--title', 'Bridge coordinator', '--command',
+        `orca orchestration run-use --id ${this.config.runId} --json > '${file.replaceAll("'", `'\\''`)}'`, '--json']));
+      handle = (created.result as { terminal?: { handle?: unknown } } | undefined)?.terminal?.handle as string | undefined;
+      if (!created.ok || typeof handle !== 'string' || !handle) throw new Error('terminal create returned no handle');
+      let receipt: ReturnType<typeof parseEnvelope> | undefined;
+      for (let attempt = 0; attempt < 240 && !receipt && !this.stopping; attempt++) {
+        try { receipt = parseEnvelope(readFileSync(file, 'utf8')); } catch { await sleep(250); }
+      }
+      if (!receipt?.ok || (receipt.result as { runId?: unknown } | undefined)?.runId !== this.config.runId) {
+        throw new Error(`run-use ${receipt?.error?.code ?? 'timed out'}: ${receipt?.error?.message ?? 'no receipt'}`);
+      }
+    } catch (error) {
+      if (handle) await this.boundary('orca', ['terminal', 'close', '--terminal', handle, '--json']).catch(() => {});
+      const delay = Math.min(5_000 * 2 ** this.bindFailures++, 300_000);
+      this.retryAt = Date.now() + delay;
+      this.log('warn', `coordinator rebind failed attempt=${this.bindFailures} retryInSeconds=${delay / 1000}: ${failure(error).message}`);
+      return false;
+    }
+    this.store.saveCoordinatorTerminal(this.config.runId, handle);
+    this.terminal = handle;
+    this.bindFailures = 0;
+    this.retryAt = 0;
+    this.log('info', `coordinator rebound to run ${this.config.runId}`);
+    return true;
+  }
   private async startup(): Promise<void> {
+    const stale = !this.terminal || await this.boundary('orca', ['terminal', 'show', '--terminal', this.terminal, '--json'])
+      .then(() => false, error => failure(error).code === 'terminal_handle_stale');
+    while (stale && !(await this.rebind())) {
+      while (Date.now() < this.retryAt && !this.stopping) await sleep(1_000);
+      if (this.stopping) return;
+    }
     for (const [index, repository] of this.config.repositories.entries()) {
       try { (this.options.installGuard ?? installPushGuard)(repository.path, this.config.hooksDirectory); }
       catch { throw new Error(`Invalid configuration fields repositories[${index}].path or hooksDirectory; push guard installation failed`); }
@@ -143,12 +199,13 @@ export class Runtime {
   }
   private pollReports(): Promise<void> {
     const result = this.reportQueue.catch(() => {}).then(async () => {
+      if (Date.now() < this.retryAt) return;
       await this.leads.reconcile();
       await this.reports.poll();
       await this.leads.poll();
       await this.socket!.adapter.replay();
       await this.refresh();
-    });
+    }).catch(error => { if (Date.now() >= this.retryAt) throw error; });
     this.reportQueue = result;
     return result;
   }

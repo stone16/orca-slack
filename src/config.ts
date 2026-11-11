@@ -4,7 +4,7 @@ import type { Repository } from './routing.js';
 
 export interface Config {
   checkout: string; botId: string; ownerId: string; allowedUsers: string[];
-  runId: string; coordinatorTerminal: string; agent: string;
+  runId: string; coordinatorTerminal?: string; agent: string;
   archiveDirectory: string; hooksDirectory: string; retentionDays: number; shutdownTimeoutMs: number;
   repositories: (Repository & { path: string; github: string })[];
 }
@@ -53,7 +53,7 @@ export function parseConfig(value: unknown, env: NodeJS.ProcessEnv, checkout: st
   if (new Set(repositories.map(repository => repository.id)).size !== repositories.length ||
       new Set(repositories.map(repository => repository.path)).size !== repositories.length) invalid('repositories');
   return { checkout: resolve(checkout), botId, ownerId, allowedUsers: users as string[],
-    runId: id('runId', /^run_[a-zA-Z0-9-]+$/), coordinatorTerminal: id('coordinatorTerminal', /^term_[a-zA-Z0-9-]+$/),
+    runId: id('runId', /^run_[a-zA-Z0-9-]+$/), coordinatorTerminal: raw.coordinatorTerminal === undefined ? undefined : id('coordinatorTerminal', /^term_[a-zA-Z0-9-]+$/),
     agent: id('agent', /^[a-zA-Z0-9_-]+$/), repositories,
     archiveDirectory: resolve(checkout, text(raw, 'archiveDirectory')),
     hooksDirectory: resolve(checkout, text(raw, 'hooksDirectory')),
