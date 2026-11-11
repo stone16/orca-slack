@@ -28,7 +28,6 @@ The required settings are:
 | `ownerId` | Operator's Slack user ID, included in `allowedUsers`. Each thread still belongs to its initiating user. |
 | `allowedUsers` | Nonempty, unique Slack user IDs allowed to use the Bridge. |
 | `runId` | Dedicated Orca Run ID, retained across service restarts. |
-| `coordinatorTerminal` | Dedicated live Orca shell terminal that owns that Run. Keep this terminal open. |
 | `agent` | Enabled Orca agent ID. |
 | `archiveDirectory` | Archive directory with its existing `.orca-slack-archive` marker. An unavailable archive retains local files. |
 | `hooksDirectory` | Hooks directory outside every configured repository's worktrees. Existing conflicting hooks cause startup to fail. |
@@ -37,6 +36,7 @@ The required settings are:
 Each repository needs its Orca `id`, routing `name`, `aliases` array, checkout `path`, and GitHub `github` name such as `example/project`.
 The runtime translates Orca IDs to GitHub names only at the `gh` command boundary.
 Paths in the config resolve relative to the Bridge checkout.
+`coordinatorTerminal` is optional: the initial Orca shell terminal that owns the Run.
 `retentionDays` defaults to 30.
 `shutdownTimeoutMs` defaults to 25000 and must be positive and at most 25000.
 Set `BRIDGE_CONFIG` to select another local config file.
@@ -49,9 +49,20 @@ orca terminal create --worktree current --title 'Bridge coordinator' \
   --command 'orca orchestration run-create --objective "Slack Bridge" --json --full > data/service-run.json' --json
 ```
 
-Use the returned `terminal.handle` for `coordinatorTerminal` and the receipt's `result.run.id` for `runId`.
+Use the receipt's `result.run.id` for `runId`, and optionally the returned `terminal.handle` for `coordinatorTerminal`.
 Keep this coordinator separate from agent terminals and other Runs.
 The service uses its identity for Orca calls and recovers that same Run's inbox after restart.
+
+## Coordinator rebind
+
+An Orca or Mac restart makes the coordinator terminal handle stale.
+At startup the Bridge rebinds when it has no handle or `orca terminal show` returns `terminal_handle_stale`.
+While running, it rebinds when an Orca call fails with `stable_pane_required` or `terminal_handle_stale`, then retries that call once.
+A rebind creates a `Bridge coordinator` terminal in the checkout that runs `orca orchestration run-use --id <run_id> --json` into the ignored `data/coordinator-bind.json`, and waits up to 60 seconds for a successful receipt for the same Run.
+The new handle is stored in the ledger and used for every later Orca call, including after restarts; the ledger value takes precedence over the config value.
+A failed rebind closes its terminal, logs one `coordinator rebind failed` line, and retries after 5 seconds, doubling to at most 5 minutes.
+Report polls pause quietly during that backoff, and startup waits before reconciling or connecting Socket Mode.
+The Bridge never creates a Run.
 
 ## Start and stop
 
