@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -7,7 +8,7 @@ import { Cleanup } from './cleanup.js';
 import { redactingLog, type Config, type Log } from './config.js';
 import type { RunCommand } from './commands.js';
 import { LeadCli } from './lead-orca.js';
-import { parseEnvelope } from './orca.js';
+import { COORDINATOR_FAILURES, OrcaError, parseEnvelope } from './orca.js';
 import { Leads } from './leads.js';
 import { PrPoller } from './pr-poller.js';
 import { installPushGuard } from './push-guard.js';
@@ -30,7 +31,6 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !ke
 const command: RunCommand = async (program, args, terminal) => (await execute(program, args, {
   env: terminal ? { ...env, ORCA_TERMINAL_HANDLE: terminal } : env, encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024,
 })).stdout;
-const STALE = ['stable_pane_required', 'terminal_handle_stale'];
 function failure(error: unknown): { code?: string; message?: string } {
   try { return parseEnvelope((error as { stdout?: string }).stdout ?? '').error ?? {}; }
   catch { return { message: error instanceof Error ? error.message : String(error) }; }
@@ -71,15 +71,28 @@ export class Runtime {
         if (index > 0 && repository) normalized[index] = repository.github;
       }
       if (program !== 'orca') return boundary(program, normalized);
-      try { return await boundary(program, normalized, this.terminal); }
-      catch (error) {
-        if (!STALE.includes(failure(error).code!) || !(await this.rebind())) throw error;
-        return boundary(program, normalized, this.terminal);
+      for (let attempt = 0; ; attempt++) {
+        const used = this.terminal;
+        try { return await boundary(program, normalized, used); }
+        catch (error) {
+          const { code } = failure(error);
+          // A stale handle named by --terminal belongs to a lead, not to the coordinator identity.
+          const lost = code === 'stable_pane_required' || (code === 'terminal_handle_stale' && !normalized.includes('--terminal'));
+          if (attempt < 2 && (lost || code === 'consumer_fenced') && this.terminal !== used) continue;
+          if (attempt < 2 && lost && await this.rebind(used)) continue;
+          if (code === 'consumer_fenced' && Date.now() >= this.retryAt) {
+            this.backoff('error', `coordinator terminal is not bound to run ${config.runId}; another terminal owns it. ` +
+              'Set coordinatorTerminal in the config to that terminal and restart the Bridge');
+          }
+          throw error;
+        }
       }
     };
     mkdirSync(join(config.checkout, 'data'), { recursive: true, mode: 0o700 });
     this.store = new Store(join(config.checkout, 'data', 'bridge.sqlite'));
-    this.terminal = this.store.coordinatorTerminal(config.runId) ?? config.coordinatorTerminal;
+    const saved = this.store.coordinatorTerminal(config.runId);
+    if (saved && saved.configured !== (config.coordinatorTerminal ?? null)) this.store.clearCoordinatorTerminal(config.runId);
+    this.terminal = saved && saved.configured === (config.coordinatorTerminal ?? null) ? saved.handle : config.coordinatorTerminal;
     this.orca = new LeadCli(async args => {
       try { return { stdout: await run('orca', args) }; }
       catch (error) { return { stdout: (error as { stdout?: string }).stdout ?? '', failed: true }; }
@@ -106,13 +119,18 @@ export class Runtime {
     if (this.closed || this.stopping) return Promise.reject(new Error('Runtime has stopped'));
     return this.starting ??= this.work(() => this.startup());
   }
-  private rebind(): Promise<boolean> {
+  private backoff(level: string, message: string): void {
+    const delay = Math.min(5_000 * 2 ** this.bindFailures++, 300_000);
+    this.retryAt = Date.now() + delay;
+    this.log(level, `${message} attempt=${this.bindFailures} retryInSeconds=${delay / 1000}`);
+  }
+  private rebind(used: string | undefined): Promise<boolean> {
+    if (this.terminal !== used) return Promise.resolve(true);
     return this.binding ??= this.bind().finally(() => { this.binding = undefined; });
   }
   private async bind(): Promise<boolean> {
     if (Date.now() < this.retryAt || this.stopping) return false;
-    const file = join(this.config.checkout, 'data', 'coordinator-bind.json');
-    rmSync(file, { force: true });
+    const file = join(this.config.checkout, 'data', `coordinator-bind-${randomUUID()}.json`);
     let handle: string | undefined;
     try {
       const created = parseEnvelope(await this.boundary('orca', ['terminal', 'create', '--worktree', `path:${this.config.checkout}`,
@@ -124,34 +142,45 @@ export class Runtime {
       for (let attempt = 0; attempt < 240 && !receipt && !this.stopping; attempt++) {
         try { receipt = parseEnvelope(readFileSync(file, 'utf8')); } catch { await sleep(250); }
       }
+      if (this.stopping) throw new Error('stopping');
       if (!receipt?.ok || (receipt.result as { runId?: unknown } | undefined)?.runId !== this.config.runId) {
         throw new Error(`run-use ${receipt?.error?.code ?? 'timed out'}: ${receipt?.error?.message ?? 'no receipt'}`);
       }
+      this.store.saveCoordinatorTerminal(this.config.runId, handle, this.config.coordinatorTerminal ?? null);
     } catch (error) {
       if (handle) await this.boundary('orca', ['terminal', 'close', '--terminal', handle, '--json']).catch(() => {});
-      const delay = Math.min(5_000 * 2 ** this.bindFailures++, 300_000);
-      this.retryAt = Date.now() + delay;
-      this.log('warn', `coordinator rebind failed attempt=${this.bindFailures} retryInSeconds=${delay / 1000}: ${failure(error).message}`);
+      if (!this.stopping) this.backoff('warn', `coordinator rebind failed: ${failure(error).message}`);
       return false;
-    }
-    this.store.saveCoordinatorTerminal(this.config.runId, handle);
+    } finally { rmSync(file, { force: true }); }
     this.terminal = handle;
     this.bindFailures = 0;
     this.retryAt = 0;
     this.log('info', `coordinator rebound to run ${this.config.runId}`);
     return true;
   }
-  private async startup(): Promise<void> {
-    const stale = !this.terminal || await this.boundary('orca', ['terminal', 'show', '--terminal', this.terminal, '--json'])
-      .then(() => false, error => failure(error).code === 'terminal_handle_stale');
-    while (stale && !(await this.rebind())) {
-      while (Date.now() < this.retryAt && !this.stopping) await sleep(1_000);
-      if (this.stopping) return;
+  private async ready(): Promise<boolean> {
+    if (Date.now() < this.retryAt) return false;
+    const used = this.terminal;
+    if (!used) return this.rebind(used);
+    try { await this.boundary('orca', ['terminal', 'show', '--terminal', used, '--json']); }
+    catch (error) {
+      const { code, message } = failure(error);
+      if (code === 'terminal_handle_stale') return this.rebind(used);
+      this.backoff('warn', `coordinator terminal check failed: ${message}`);
+      return false;
     }
+    this.bindFailures = 0;
+    return true;
+  }
+  private async startup(): Promise<void> {
     for (const [index, repository] of this.config.repositories.entries()) {
       try { (this.options.installGuard ?? installPushGuard)(repository.path, this.config.hooksDirectory); }
       catch { throw new Error(`Invalid configuration fields repositories[${index}].path or hooksDirectory; push guard installation failed`); }
       this.log('info', 'push guard installed');
+    }
+    while (!(await this.ready())) {
+      while (Date.now() < this.retryAt && !this.stopping) await sleep(1_000);
+      if (this.stopping) return;
     }
     this.socket = (this.options.socketMode ?? createSocketMode)(this.store, {
       orca: this.orca, allowedUsers: this.config.allowedUsers, botId: this.config.botId,
@@ -205,7 +234,10 @@ export class Runtime {
       await this.leads.poll();
       await this.socket!.adapter.replay();
       await this.refresh();
-    }).catch(error => { if (Date.now() >= this.retryAt) throw error; });
+    }).catch(error => {
+      const code = error instanceof OrcaError ? error.code : failure(error).code;
+      if (Date.now() >= this.retryAt || !COORDINATOR_FAILURES.includes(code!)) throw error;
+    });
     this.reportQueue = result;
     return result;
   }

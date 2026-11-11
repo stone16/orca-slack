@@ -11,6 +11,7 @@ export interface StartReceipt {
   stage?: string; failedStage?: string; lastError?: string;
   effects?: { kind?: string; id?: string }[];
 }
+export const COORDINATOR_FAILURES = ['stable_pane_required', 'terminal_handle_stale', 'consumer_fenced'];
 export class OrcaError extends Error {
   constructor(message: string, readonly receipt: StartReceipt = {}, readonly code?: string) { super(message); }
 }
