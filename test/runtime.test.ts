@@ -40,16 +40,27 @@ function fixture(realBolt = false) {
     taskId: 'task', dispatchId: 'dispatch', handle: 'handle' });
   store.saveInbound(thread, { installationId: 'A:T', eventId: 'event', channel: 'C1', ts: '2', threadTs: '1', user: config.ownerId, text: 'example Follow up' }, 'prompt');
   store.close();
-  const commands: { program: string; args: string[] }[] = [];
-  const control = { prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false, workerListDelay: 0, terminalStatus: 'running',
+  const commands: { program: string; args: string[]; terminal?: string }[] = [];
+  const control = { stale: new Set<string>(), bindError: '', bound: 0, prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false, workerListDelay: 0, terminalStatus: 'running',
     workers: [] as { dispatchId: string; taskId: string; runId: string; agentTerminalHandle: string | null; projection: { workspace: { id: string } } }[] };
   const treePath = join(root, 'worktree'); mkdirSync(treePath);
   const messages: { id: string; type: string; sequence: number; payload: string; body: string }[] = [];
   let unread = false;
   let workerListReads = 0;
   let blocked: { verb: string; entered: () => void; wait: Promise<void> } | undefined;
-  const run: RunCommand = async (program, args) => {
-    commands.push({ program, args });
+  const run: RunCommand = async (program, args, terminal) => {
+    commands.push({ program, args, terminal });
+    const fail = (code: string, message: string) => Object.assign(new Error('Command failed'), { stdout: JSON.stringify({ ok: false, error: { code, message } }) });
+    if (program === 'orca' && args[0] === 'orchestration' && (!terminal || control.stale.has(terminal))) {
+      throw fail('stable_pane_required', 'The coordinator terminal has no stable pane identity.');
+    }
+    if (program === 'orca' && args[0] === 'terminal' && args[1] === 'show' && control.stale.has(args[3])) throw fail('terminal_handle_stale', 'terminal_handle_stale');
+    if (program === 'orca' && args[0] === 'terminal' && args[1] === 'create') {
+      const handle = `term_bound${++control.bound}`;
+      const [, file] = /> '(.+)'$/.exec(args[args.indexOf('--command') + 1])!;
+      writeFileSync(file, JSON.stringify(control.bindError ? { ok: false, error: { code: 'run_not_found', message: control.bindError } } : { ok: true, result: { runId: config.runId } }));
+      return JSON.stringify({ ok: true, result: { terminal: { handle } } });
+    }
     if (program === 'orca' && blocked?.verb === args[1]) {
       const current = blocked; blocked = undefined; current.entered(); await current.wait;
     }
@@ -696,4 +707,67 @@ test.each(['ambiguous', 'missing handle', 'known dispatch', 'known missing handl
     expect(f.posts.filter(post => String(post.text).includes('Retained report'))).toHaveLength(1);
     expect(f.commands.filter(command => command.args[1] === 'worker-start')).toHaveLength(0);
   } finally { f.release(); store.close(); }
+});
+
+const orcaTerminals = (f: ReturnType<typeof fixture>) => f.commands.filter(command => command.args[0] === 'orchestration').map(command => command.terminal);
+const binds = (f: ReturnType<typeof fixture>) => f.commands.filter(command => command.args[0] === 'terminal' && command.args[1] === 'create');
+
+test('C1 a stale coordinator handle at startup rebinds the same Run before reconciling and connecting Socket Mode', async () => {
+  const f = fixture(); f.control.stale.add('term_fixture'); f.addReport('worker_done', 'succeeded', 'Recovered result');
+  await f.runtime.start();
+  expect(binds(f)).toHaveLength(1);
+  expect(binds(f)[0].args.at(-2)).toContain(`orca orchestration run-use --id ${f.config.runId} --json`);
+  expect(f.commands.some(command => command.args.includes('run-create'))).toBe(false);
+  expect(new Set(orcaTerminals(f))).toEqual(new Set(['term_bound1']));
+  expect(f.commands.findIndex(command => command.args[1] === 'inbox')).toBeGreaterThan(f.commands.indexOf(binds(f)[0]));
+  expect(f.lifecycle).toEqual(['connected']);
+  expect(f.posts.filter(post => String(post.text).includes('Recovered result'))).toHaveLength(1);
+});
+
+test('C2 a handle that goes stale mid-run rebinds once on the next poll and delivers the pending report once', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  expect(binds(f)).toHaveLength(0);
+  f.control.stale.add('term_fixture'); f.addReport('worker_done', 'succeeded', 'Mid-run result');
+  const before = f.commands.length;
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(binds(f)).toHaveLength(1);
+  const later = f.commands.slice(before).filter(command => command.args[0] === 'orchestration' && command.terminal !== 'term_fixture');
+  expect(later.length).toBeGreaterThan(0);
+  expect(later.every(command => command.terminal === 'term_bound1')).toBe(true);
+  expect(f.posts.filter(post => String(post.text).includes('Mid-run result'))).toHaveLength(1);
+  const store = new Store(f.file);
+  try { expect(store.reports(f.config.runId).every(report => report.state === 'sent')).toBe(true); }
+  finally { store.close(); }
+});
+
+test('C3 a repeatedly failing run-use backs off, logs once per attempt, and never creates a Run', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); f.control.stale.add('term_fixture'); f.control.bindError = 'scripted bind failure';
+  const starting = f.runtime.start();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(binds(f)).toHaveLength(4);
+  const failures = f.logs.filter(line => line.includes('coordinator rebind failed'));
+  expect(failures).toHaveLength(4);
+  expect(failures[0]).toContain('scripted bind failure');
+  expect(f.logs.filter(line => line.startsWith('error'))).toHaveLength(0);
+  expect(f.commands.filter(command => command.args.includes('terminal') && command.args.includes('close'))).toHaveLength(4);
+  expect(f.lifecycle).toEqual([]);
+  expect(f.commands.some(command => command.args.includes('run-create'))).toBe(false);
+  f.control.bindError = '';
+  await vi.advanceTimersByTimeAsync(80_000);
+  await starting;
+  expect(binds(f)).toHaveLength(5);
+  expect(f.lifecycle).toEqual(['connected']);
+});
+
+test('C4 a restart after a rebind reuses the ledger handle instead of the config value', async () => {
+  const f = fixture(); f.control.stale.add('term_fixture');
+  await f.runtime.start(); await f.runtime.stop();
+  const before = f.commands.length;
+  await f.restart().start();
+  const after = f.commands.slice(before);
+  expect(binds(f)).toHaveLength(1);
+  expect(after.filter(command => command.args[0] === 'orchestration').every(command => command.terminal === 'term_bound1')).toBe(true);
+  expect(after.some(command => command.terminal === 'term_fixture' || command.args.includes('term_fixture'))).toBe(false);
 });

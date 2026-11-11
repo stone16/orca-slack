@@ -14,8 +14,13 @@ export const settings = {
 };
 export const secrets = { SLACK_BOT_TOKEN: 'xoxb-fixture-secret', SLACK_APP_TOKEN: 'xapp-fixture-secret' };
 
+test('the coordinator terminal is an optional initial value', () => {
+  const { coordinatorTerminal, ...value } = settings;
+  expect(parseConfig(value, secrets, process.cwd()).coordinatorTerminal).toBeUndefined();
+  expect(parseConfig(settings, secrets, process.cwd()).coordinatorTerminal).toBe(coordinatorTerminal);
+});
 for (const field of Object.keys(settings)) {
-  test(`configuration names missing required field ${field}`, () => {
+  if (field !== 'coordinatorTerminal') test(`configuration names missing required field ${field}`, () => {
     const value: Record<string, unknown> = { ...settings };
     delete value[field];
     expect(() => parseConfig(value, secrets, process.cwd())).toThrow(field);
