@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { OrcaError } from './orca.js';
+import { COORDINATOR_FAILURES, OrcaError } from './orca.js';
 import type { LeadOrca } from './lead-orca.js';
 import { classify, type Repository } from './routing.js';
 import { Store, type LeadEvent, type LeadSession, type Report } from './store.js';
@@ -232,7 +232,8 @@ export class Leads {
         worker = await this.orca.call<WorkerRead>('worker-read', ['--dispatch', lead.dispatchId]);
       }
       terminal = await this.orca.readTerminal(lead.handle, previous?.terminalCursor);
-    } catch {
+    } catch (error) {
+      if (error instanceof OrcaError && COORDINATOR_FAILURES.includes(error.code!)) throw error;
       if (previous) this.store.saveLeadObservation({ ...previous, source: '', frozen: 0 });
       this.event(lead, 'unknown', 'Orca state could not be verified.', `read-unknown:${randomUUID()}`);
       return;

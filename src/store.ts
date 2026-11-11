@@ -123,7 +123,7 @@ export class Store {
         threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, user TEXT NOT NULL,
         afterSessionId TEXT NOT NULL REFERENCES lead_sessions(id), promptKey TEXT NOT NULL REFERENCES inbound(key),
         PRIMARY KEY(threadId, key));
-      CREATE TABLE IF NOT EXISTS coordinator_terminals (runId TEXT PRIMARY KEY, handle TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS coordinator_terminals (runId TEXT PRIMARY KEY, handle TEXT NOT NULL, configured TEXT);
       CREATE TABLE IF NOT EXISTS slack_actions (
         threadId TEXT NOT NULL REFERENCES threads(id), key TEXT NOT NULL, user TEXT NOT NULL,
         PRIMARY KEY(threadId, key));`);
@@ -136,11 +136,16 @@ export class Store {
       return result;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  coordinatorTerminal(runId: string): string | undefined {
-    return (this.db.prepare('SELECT handle FROM coordinator_terminals WHERE runId=?').get(runId) as { handle: string } | undefined)?.handle;
+  coordinatorTerminal(runId: string): { handle: string; configured: string | null } | undefined {
+    return this.db.prepare('SELECT handle, configured FROM coordinator_terminals WHERE runId=?').get(runId) as
+      { handle: string; configured: string | null } | undefined;
   }
-  saveCoordinatorTerminal(runId: string, handle: string): void {
-    this.db.prepare('INSERT INTO coordinator_terminals VALUES (?, ?) ON CONFLICT(runId) DO UPDATE SET handle=excluded.handle').run(runId, handle);
+  saveCoordinatorTerminal(runId: string, handle: string, configured: string | null): void {
+    this.db.prepare(`INSERT INTO coordinator_terminals VALUES (?, ?, ?)
+      ON CONFLICT(runId) DO UPDATE SET handle=excluded.handle, configured=excluded.configured`).run(runId, handle, configured);
+  }
+  clearCoordinatorTerminal(runId: string): void {
+    this.db.prepare('DELETE FROM coordinator_terminals WHERE runId=?').run(runId);
   }
   saveThread(thread: Thread): void {
     this.db.prepare(`INSERT INTO threads VALUES (?, ?, ?, ?, ?)
