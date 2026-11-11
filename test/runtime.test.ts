@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter, once } from 'node:events';
 import ts from 'typescript';
 import { App, type ReceiverEvent } from '@slack/bolt';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
@@ -41,7 +41,7 @@ function fixture(realBolt = false) {
   store.saveInbound(thread, { installationId: 'A:T', eventId: 'event', channel: 'C1', ts: '2', threadTs: '1', user: config.ownerId, text: 'example Follow up' }, 'prompt');
   store.close();
   const commands: { program: string; args: string[]; terminal?: string }[] = [];
-  const control = { stale: new Set<string>(), bindError: '', bound: 0, prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false, workerListDelay: 0, terminalStatus: 'running',
+  const control = { stale: new Set<string>(), bindError: '', bindSilent: false, bound: 0, owner: '', showFailures: 0, prState: 'OPEN', worktreePresent: true, failStart: false, failSend: false, failReaction: false, workerListDelay: 0, terminalStatus: 'running',
     workers: [] as { dispatchId: string; taskId: string; runId: string; agentTerminalHandle: string | null; projection: { workspace: { id: string } } }[] };
   const treePath = join(root, 'worktree'); mkdirSync(treePath);
   const messages: { id: string; type: string; sequence: number; payload: string; body: string }[] = [];
@@ -50,19 +50,26 @@ function fixture(realBolt = false) {
   let blocked: { verb: string; entered: () => void; wait: Promise<void> } | undefined;
   const run: RunCommand = async (program, args, terminal) => {
     commands.push({ program, args, terminal });
+    if (program === 'orca' && blocked?.verb === args[1]) {
+      const current = blocked; blocked = undefined; current.entered(); await current.wait;
+    }
     const fail = (code: string, message: string) => Object.assign(new Error('Command failed'), { stdout: JSON.stringify({ ok: false, error: { code, message } }) });
+    if (program === 'orca' && args[0] === 'orchestration' && control.owner && terminal !== control.owner) {
+      throw fail('consumer_fenced', `This caller is not bound to Run ${config.runId}, which is bound to ${control.owner}. Nothing changed.`);
+    }
     if (program === 'orca' && args[0] === 'orchestration' && (!terminal || control.stale.has(terminal))) {
       throw fail('stable_pane_required', 'The coordinator terminal has no stable pane identity.');
     }
-    if (program === 'orca' && args[0] === 'terminal' && args[1] === 'show' && control.stale.has(args[3])) throw fail('terminal_handle_stale', 'terminal_handle_stale');
+    if (program === 'orca' && args[0] === 'terminal' && args[1] === 'show' && control.showFailures > 0) {
+      control.showFailures--; throw fail('runtime_unavailable', 'scripted Orca not ready');
+    }
+    if (program === 'orca' && args[0] === 'terminal' && ['show', 'read'].includes(args[1]) && control.stale.has(args[3])) throw fail('terminal_handle_stale', 'terminal_handle_stale');
     if (program === 'orca' && args[0] === 'terminal' && args[1] === 'create') {
       const handle = `term_bound${++control.bound}`;
       const [, file] = /> '(.+)'$/.exec(args[args.indexOf('--command') + 1])!;
-      writeFileSync(file, JSON.stringify(control.bindError ? { ok: false, error: { code: 'run_not_found', message: control.bindError } } : { ok: true, result: { runId: config.runId } }));
+      if (!control.bindSilent) writeFileSync(file, JSON.stringify(control.bindError ? { ok: false, error: { code: 'run_not_found', message: control.bindError } } : { ok: true, result: { runId: config.runId } }));
+      if (!control.bindSilent && !control.bindError) control.owner = handle;
       return JSON.stringify({ ok: true, result: { terminal: { handle } } });
-    }
-    if (program === 'orca' && blocked?.verb === args[1]) {
-      const current = blocked; blocked = undefined; current.entered(); await current.wait;
     }
     if (program === 'gh') return JSON.stringify([{ number: 7, url: 'https://github.com/example/project/pull/7', state: control.prState, headRefOid: 'a'.repeat(40) }]);
     if (program === 'git') {
@@ -713,7 +720,7 @@ const orcaTerminals = (f: ReturnType<typeof fixture>) => f.commands.filter(comma
 const binds = (f: ReturnType<typeof fixture>) => f.commands.filter(command => command.args[0] === 'terminal' && command.args[1] === 'create');
 
 test('C1 a stale coordinator handle at startup rebinds the same Run before reconciling and connecting Socket Mode', async () => {
-  const f = fixture(); f.control.stale.add('term_fixture'); f.addReport('worker_done', 'succeeded', 'Recovered result');
+  const f = fixture(); f.control.stale.add('term_fixture'); f.control.stale.add('handle'); f.addReport('worker_done', 'succeeded', 'Recovered result');
   await f.runtime.start();
   expect(binds(f)).toHaveLength(1);
   expect(binds(f)[0].args.at(-2)).toContain(`orca orchestration run-use --id ${f.config.runId} --json`);
@@ -770,4 +777,118 @@ test('C4 a restart after a rebind reuses the ledger handle instead of the config
   expect(binds(f)).toHaveLength(1);
   expect(after.filter(command => command.args[0] === 'orchestration').every(command => command.terminal === 'term_bound1')).toBe(true);
   expect(after.some(command => command.terminal === 'term_fixture' || command.args.includes('term_fixture'))).toBe(false);
+});
+
+const bindFile = (command: { args: string[] }) => /> '(.+)'$/.exec(command.args[command.args.indexOf('--command') + 1])![1];
+const closes = (f: ReturnType<typeof fixture>) => f.commands.filter(command => command.args[0] === 'terminal' && command.args[1] === 'close');
+
+test('B1 a stale lead terminal keeps lead observation handling and never creates a coordinator terminal', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  f.control.stale.add('handle');
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(f.commands.some(command => command.args[1] === 'read' && command.args.includes('handle'))).toBe(true);
+  expect(binds(f)).toHaveLength(0);
+  const store = new Store(f.file);
+  try { expect(store.leadEvents('thread').some(event => event.kind === 'unknown')).toBe(true); }
+  finally { store.close(); }
+});
+
+test('B2 two overlapping stale failures create exactly one coordinator terminal and the fenced call retries on the new handle', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  f.control.stale.add('term_fixture');
+  const held = f.block('worker-read');
+  const tail = f.options().logTail('thread');
+  await held.ready;
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(binds(f)).toHaveLength(1);
+  held.release();
+  await expect(tail).resolves.toBe('');
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(binds(f)).toHaveLength(1);
+  expect(f.logs.filter(line => line.startsWith('error'))).toEqual([]);
+});
+
+test('B3 each bind attempt accepts only its own receipt file and removes it', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); f.control.stale.add('term_fixture'); f.control.bindSilent = true;
+  writeFileSync(join(f.config.checkout, 'data', 'coordinator-bind.json'), JSON.stringify({ ok: true, result: { runId: f.config.runId } }));
+  const starting = f.runtime.start();
+  await vi.advanceTimersByTimeAsync(61_000);
+  expect(binds(f)).toHaveLength(1);
+  expect(f.logs.filter(line => line.includes('coordinator rebind failed'))).toHaveLength(1);
+  expect(closes(f)).toHaveLength(1);
+  f.control.bindSilent = false;
+  await vi.advanceTimersByTimeAsync(10_000);
+  await starting;
+  const files = binds(f).map(bindFile);
+  expect(new Set(files).size).toBe(2);
+  expect(files.some(file => existsSync(file))).toBe(false);
+  expect(f.lifecycle).toEqual(['connected']);
+});
+
+test('B4 an operator-changed coordinatorTerminal replaces the ledger handle at restart', async () => {
+  const f = fixture(); f.control.stale.add('term_fixture');
+  await f.runtime.start(); await f.runtime.stop();
+  f.config.coordinatorTerminal = 'term_operator'; f.control.owner = 'term_operator';
+  const before = f.commands.length;
+  await f.restart().start();
+  expect(binds(f)).toHaveLength(1);
+  expect(f.commands.slice(before).filter(command => command.args[0] === 'orchestration').every(command => command.terminal === 'term_operator')).toBe(true);
+  const store = new Store(f.file);
+  try { expect(store.coordinatorTerminal(f.config.runId)).toBeUndefined(); }
+  finally { store.close(); }
+});
+
+test('B4 a Run bound to another terminal is never stolen and logs one error per backoff step', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  f.control.owner = 'term_other';
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(binds(f)).toHaveLength(0);
+  const errors = f.logs.filter(line => line.startsWith('error'));
+  expect(errors).toHaveLength(4);
+  expect(errors.every(line => line.includes('coordinatorTerminal'))).toBe(true);
+});
+
+test('SF1 rebind backoff skips lead observation instead of recording an unknown lead', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); await f.runtime.start();
+  f.pause('after-consume-persist');
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(f.paused()).toBe(true);
+  f.control.stale.add('term_fixture'); f.control.bindError = 'scripted bind failure';
+  f.release(); f.pause('never');
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(f.logs.filter(line => line.includes('coordinator rebind failed')).length).toBeGreaterThan(0);
+  expect(f.logs.filter(line => line.startsWith('error'))).toEqual([]);
+  const store = new Store(f.file);
+  try { expect(store.leadEvents('thread').filter(event => ['unknown', 'interrupted'].includes(event.kind))).toEqual([]); }
+  finally { store.close(); }
+});
+
+test('SF2 stopping during a bind exits quietly and closes the created terminal', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); f.control.stale.add('term_fixture'); f.control.bindSilent = true;
+  const starting = f.runtime.start();
+  await vi.advanceTimersByTimeAsync(1_000);
+  const stopping = f.runtime.stop();
+  await vi.advanceTimersByTimeAsync(1_000);
+  await stopping; await starting;
+  expect(closes(f)).toHaveLength(1);
+  expect(f.logs.filter(line => line.includes('coordinator rebind failed'))).toEqual([]);
+  expect(f.lifecycle).toEqual([]);
+});
+
+test('SF3 a transient terminal show failure at startup waits in the startup retry loop', async () => {
+  vi.useFakeTimers();
+  const f = fixture(); f.control.showFailures = 2;
+  const starting = f.runtime.start();
+  await vi.advanceTimersByTimeAsync(20_000);
+  await starting;
+  expect(f.commands.filter(command => command.args[0] === 'terminal' && command.args[1] === 'show')).toHaveLength(3);
+  expect(f.logs.filter(line => line.includes('coordinator terminal check failed'))).toHaveLength(2);
+  expect(binds(f)).toHaveLength(0);
+  expect(f.lifecycle).toEqual(['connected']);
 });
